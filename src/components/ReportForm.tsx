@@ -39,6 +39,7 @@ export const ReportForm: React.FC<ReportFormProps> = ({
 
   const [isExtracting, setIsExtracting] = useState(false);
   const [uploadedPdfName, setUploadedPdfName] = useState<string>('');
+  const [lastPdfFile, setLastPdfFile] = useState<File | null>(null);
   const [extractStatus, setExtractStatus] = useState<{
     type: 'success' | 'error' | 'info';
     message: string;
@@ -68,9 +69,13 @@ export const ReportForm: React.FC<ReportFormProps> = ({
       return;
     }
 
+    setLastPdfFile(file);
     setUploadedPdfName(file.name);
     setIsExtracting(true);
     setExtractStatus(null);
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 40000);
 
     try {
       const base64 = await new Promise<string>((resolve, reject) => {
@@ -83,30 +88,50 @@ export const ReportForm: React.FC<ReportFormProps> = ({
       const response = await fetch('/api/extract-spt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           pdfBase64: base64,
           fileName: file.name,
         }),
       });
 
-      const payload = await response.json();
+      const rawText = await response.text();
+      let payload: { extracted?: Partial<TravelReportData>; error?: string } = {};
+      try {
+        payload = rawText ? (JSON.parse(rawText) as typeof payload) : {};
+      } catch {
+        payload = {};
+      }
+
       if (!response.ok) {
+        if (response.status === 503) {
+          throw new Error(
+            payload?.error ||
+              'Server AI sedang sibuk (503 UNAVAILABLE). Silakan klik "Coba Lagi" dalam beberapa detik.',
+          );
+        }
         throw new Error(payload?.error || 'Gagal mengekstrak data dari file PDF SPT.');
       }
 
-      const extracted = payload.extracted as Partial<TravelReportData>;
+      const extracted = (payload.extracted || {}) as Partial<TravelReportData>;
       onApplyExtractedSpt(extracted, file.name);
       setExtractStatus({
         type: 'success',
         message: `Ekstraksi otomatis dari "${file.name}" berhasil. Kolom dikunci untuk mencegah kesalahan ketik.`,
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Gagal memproses file PDF.';
+      const isAbort = err instanceof DOMException && err.name === 'AbortError';
+      const msg = isAbort
+        ? 'Waktu tunggu ekstraksi habis (melebihi 40 detik) karena koneksi atau server AI padat.'
+        : err instanceof Error
+          ? err.message
+          : 'Gagal memproses file PDF.';
       setExtractStatus({
         type: 'error',
-        message: `${msg} Anda dapat menggunakan tombol "Simulasi Ekstraksi SPT" atau "Ubah Data" untuk mengisi manual.`,
+        message: `${msg} Anda dapat menekan "Coba Lagi", menggunakan "Simulasi Ekstraksi SPT", atau klik "Ubah Data" untuk mengisi manual.`,
       });
     } finally {
+      window.clearTimeout(timeoutId);
       setIsExtracting(false);
     }
   };
@@ -300,7 +325,19 @@ export const ReportForm: React.FC<ReportFormProps> = ({
             ) : (
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             )}
-            <span>{extractStatus.message}</span>
+            <div className="flex-1 space-y-2">
+              <span className="block">{extractStatus.message}</span>
+              {extractStatus.type === 'error' && lastPdfFile && (
+                <button
+                  type="button"
+                  disabled={isExtracting}
+                  onClick={() => handlePdfFile(lastPdfFile)}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold text-[#991B1B] bg-white border border-[#FCA5A5] rounded hover:bg-[#FEE2E2] disabled:opacity-50 transition-colors"
+                >
+                  Coba Lagi
+                </button>
+              )}
+            </div>
           </div>
         )}
       </section>
