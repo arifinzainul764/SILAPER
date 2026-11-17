@@ -16,6 +16,7 @@ import { StoredTravelReport } from '../types/report';
 interface ArchivePanelProps {
   user: User | null;
   authReady: boolean;
+  isTempAdmin?: boolean;
   reports: StoredTravelReport[];
   loadingReports: boolean;
   activeReportId: string | null;
@@ -29,6 +30,7 @@ interface ArchivePanelProps {
 export const ArchivePanel: React.FC<ArchivePanelProps> = ({
   user,
   authReady,
+  isTempAdmin = false,
   reports,
   loadingReports,
   activeReportId,
@@ -67,7 +69,7 @@ export const ArchivePanel: React.FC<ArchivePanelProps> = ({
     );
   }
 
-  if (!user) {
+  if (!user && !isTempAdmin) {
     return (
       <div className="max-w-xl mx-auto py-12 px-6">
         <div className="bg-white border border-[#D8E0EB] rounded-lg p-8 text-center">
@@ -102,7 +104,8 @@ export const ArchivePanel: React.FC<ArchivePanelProps> = ({
               Arsip Laporan Perjalanan Dinas Tersimpan
             </h2>
             <p className="text-xs text-[#475569] mt-0.5">
-              Akun aktif: {user.displayName || user.email} · Terisolasi privat per akun staf
+              Akun aktif: {user?.displayName || user?.email || 'Administrator Sementara (admin)'} ·{' '}
+              {user ? 'Terisolasi privat per akun staf' : 'Penyimpanan sesi lokal browser'}
             </p>
           </div>
 

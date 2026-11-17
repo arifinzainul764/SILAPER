@@ -16,8 +16,18 @@ service cloud.firestore {
       return isSignedIn() && request.auth.token.email_verified == true;
     }
 
+    function isAdmin() {
+      return isVerifiedUser()
+        && request.auth.token.email != null
+        && request.auth.token.email.lower() == 'arifinzainul764@gmail.com';
+    }
+
     function isValidId(id) {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidEmailId(id) {
+      return id is string && id.size() >= 3 && id.size() <= 180 && id.matches('^[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}$');
     }
 
     function incoming() {
@@ -41,6 +51,20 @@ service cloud.firestore {
         && data.email is string && data.email.size() >= 3 && data.email.size() <= 180
         && (!data.keys().hasAny(['photoURL']) || (data.photoURL is string && data.photoURL.size() <= 500))
         && (!data.keys().hasAny(['instansi']) || (data.instansi is string && data.instansi.size() <= 160))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: AuthorizedStaff
+    function isValidAuthorizedStaff(data, staffId) {
+      return data.keys().hasAll(['email', 'displayName', 'jabatan', 'nip', 'active', 'addedBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['email', 'displayName', 'jabatan', 'nip', 'active', 'addedBy', 'createdAt', 'updatedAt'])
+        && data.email is string && data.email == staffId && isValidEmailId(data.email)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && data.jabatan is string && data.jabatan.size() <= 160
+        && data.nip is string && data.nip.size() <= 60
+        && data.active is bool
+        && data.addedBy is string && data.addedBy.size() >= 1 && data.addedBy.size() <= 128 && isValidId(data.addedBy)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -107,6 +131,28 @@ service cloud.firestore {
         && (data.photos.size() <= 3 || isValidPhotoItem(data.photos[3]))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
+    }
+
+    match /authorizedStaff/{staffId} {
+      allow get: if isVerifiedUser()
+        && isValidEmailId(staffId)
+        && (isAdmin() || (request.auth.token.email != null && request.auth.token.email.lower() == staffId));
+      allow list: if isAdmin() && resource.data.addedBy == request.auth.uid;
+      allow create: if isAdmin()
+        && isValidEmailId(staffId)
+        && isValidAuthorizedStaff(incoming(), staffId)
+        && incoming().addedBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidEmailId(staffId)
+        && isValidAuthorizedStaff(incoming(), staffId)
+        && incoming().email == existing().email
+        && incoming().addedBy == existing().addedBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'jabatan', 'nip', 'active', 'updatedAt']);
+      allow delete: if isAdmin() && isValidEmailId(staffId);
     }
 
     match /users/{userId} {

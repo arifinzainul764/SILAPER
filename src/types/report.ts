@@ -141,3 +141,25 @@ export function sanitizeReportForFirestore(
     })),
   };
 }
+
+export const ADMIN_EMAIL = 'arifinzainul764@gmail.com';
+
+export const STAFF_FIELD_LIMITS = {
+  email: 180,
+  displayName: 120,
+  jabatan: 160,
+  nip: 60,
+} as const;
+
+export interface AuthorizedStaff {
+  id: string;
+  email: string;
+  displayName: string;
+  jabatan: string;
+  nip: string;
+  active: boolean;
+  addedBy: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+

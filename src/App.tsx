@@ -1,7 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   User,
   onAuthStateChanged,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  signInWithEmailAndPassword,
   signInWithPopup,
   signOut,
   updateProfile,
@@ -29,11 +32,11 @@ import {
   FileText,
   Info,
   Loader2,
-  LogIn,
   LogOut,
   Menu,
   Printer,
   RotateCcw,
+  UserCheck,
   UserPen,
   UserRound,
   Zap,
@@ -41,7 +44,9 @@ import {
 import { A4Preview } from './components/A4Preview';
 import { ArchivePanel } from './components/ArchivePanel';
 import { GuidePanel } from './components/GuidePanel';
+import { LoginPage } from './components/LoginPage';
 import { ReportForm } from './components/ReportForm';
+import { StaffAdminPanel } from './components/StaffAdminPanel';
 import { exportReportToDocx } from './lib/exportDocx';
 import { exportReportToPdf } from './lib/exportPdf';
 import {
@@ -53,13 +58,68 @@ import {
 } from './lib/firebase';
 import { SAMPLE_FULL_REPORT } from './lib/sampleData';
 import {
+  ADMIN_EMAIL,
+  AuthorizedStaff,
+  STAFF_FIELD_LIMITS,
   StoredTravelReport,
   TravelReportData,
   createEmptyReport,
   sanitizeReportForFirestore,
 } from './types/report';
 
-type ActiveTab = 'editor' | 'archive' | 'guide';
+type ActiveTab = 'editor' | 'archive' | 'guide' | 'staff';
+
+const TEMP_ADMIN_STORAGE_KEY = 'silaper_temp_admin';
+const LOCAL_REPORTS_STORAGE_KEY = 'silaper_local_reports';
+
+function readLocalReports(): StoredTravelReport[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_REPORTS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as StoredTravelReport[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalReports(reports: StoredTravelReport[]) {
+  try {
+    localStorage.setItem(LOCAL_REPORTS_STORAGE_KEY, JSON.stringify(reports));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+function mapFirebaseAuthError(err: unknown): string {
+  const code =
+    err && typeof err === 'object' && 'code' in err
+      ? String((err as { code?: unknown }).code || '')
+      : '';
+
+  switch (code) {
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/user-not-found':
+      return 'Email atau kata sandi tidak sesuai, atau akun belum didaftarkan oleh Administrator.';
+    case 'auth/invalid-email':
+      return 'Format alamat email tidak valid.';
+    case 'auth/user-disabled':
+      return 'Akun ini telah dinonaktifkan oleh Administrator.';
+    case 'auth/too-many-requests':
+      return 'Terlalu banyak percobaan login. Silakan tunggu beberapa saat lalu coba kembali.';
+    case 'auth/operation-not-allowed':
+      return 'Metode login Email & Kata Sandi belum diaktifkan pada Firebase Console (Authentication → Sign-in method).';
+    case 'auth/unauthorized-domain':
+      return 'Domain aplikasi ini belum didaftarkan pada Firebase Console (Authentication → Settings → Authorized domains).';
+    case 'auth/popup-closed-by-user':
+      return 'Jendela masuk Google ditutup sebelum proses selesai.';
+    case 'auth/popup-blocked':
+      return 'Popup login diblokir oleh browser. Izinkan popup untuk situs ini lalu coba lagi.';
+    default:
+      return err instanceof Error ? err.message : 'Gagal melakukan autentikasi.';
+  }
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('editor');
@@ -68,13 +128,35 @@ export default function App() {
   const [report, setReport] = useState<TravelReportData>(() => createEmptyReport());
   const [isUnlocked, setIsUnlocked] = useState<boolean>(false);
 
-  // Auth & Firestore Archive state
+  // Auth, Access Gate & Firestore Archive state
   const [user, setUser] = useState<User | null>(null);
+  const [isTempAdmin, setIsTempAdmin] = useState<boolean>(() => {
+    try {
+      return typeof window !== 'undefined' && sessionStorage.getItem(TEMP_ADMIN_STORAGE_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
   const [authReady, setAuthReady] = useState<boolean>(false);
+  const [isCheckingAccess, setIsCheckingAccess] = useState<boolean>(false);
+  const [accessGranted, setAccessGranted] = useState<boolean>(() => {
+    try {
+      return typeof window !== 'undefined' && sessionStorage.getItem(TEMP_ADMIN_STORAGE_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [needsEmailVerification, setNeedsEmailVerification] = useState<boolean>(false);
+  const [isAuthSubmitting, setIsAuthSubmitting] = useState<boolean>(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loginNotice, setLoginNotice] = useState<string | null>(null);
+
   const [savedReports, setSavedReports] = useState<StoredTravelReport[]>([]);
   const [loadingReports, setLoadingReports] = useState<boolean>(false);
   const [activeReportId, setActiveReportId] = useState<string | null>(null);
   const [activeReportOriginalStatus, setActiveReportOriginalStatus] = useState<'draft' | 'final' | null>(null);
+  const [staffList, setStaffList] = useState<AuthorizedStaff[]>([]);
+  const [loadingStaff, setLoadingStaff] = useState<boolean>(false);
 
   // Action feedback states
   const [isSaving, setIsSaving] = useState<boolean>(false);
@@ -177,67 +259,181 @@ export default function App() {
     }, 80);
   };
 
-  // Sync Firebase Auth state and ensure UserProfile document exists
+  const isAdminUser =
+    isTempAdmin ||
+    (Boolean(user?.email) &&
+      user?.email?.trim().toLowerCase() === ADMIN_EMAIL &&
+      user?.emailVerified === true);
+
+  const verifyAccessAndSyncProfile = useCallback(async (currentUser: User): Promise<boolean> => {
+    setIsCheckingAccess(true);
+    try {
+      const emailLower = (currentUser.email || '').trim().toLowerCase();
+      const isGoogleProvider = currentUser.providerData.some(
+        (p) => p.providerId === 'google.com',
+      );
+
+      // Firestore rules mandate verified email tokens for all authenticated accounts
+      if (!currentUser.emailVerified) {
+        setAccessGranted(false);
+        setNeedsEmailVerification(true);
+        return false;
+      }
+
+      setNeedsEmailVerification(false);
+
+      const isAdminEmail = emailLower === ADMIN_EMAIL;
+      let staffDisplayName = '';
+
+      if (!isAdminEmail) {
+        if (!emailLower) {
+          await signOut(auth);
+          setLoginError('Akun tidak memiliki alamat email yang valid.');
+          setAccessGranted(false);
+          return false;
+        }
+
+        const staffPath = `authorizedStaff/${emailLower}`;
+        try {
+          const staffSnap = await getDoc(doc(db, 'authorizedStaff', emailLower));
+          if (staffSnap.exists()) {
+            const staffData = staffSnap.data() as { active?: boolean; displayName?: string };
+            if (staffData.active === false) {
+              await signOut(auth);
+              setLoginError(
+                `Akun (${currentUser.email}) sedang dinonaktifkan oleh Administrator Kecamatan Tarik.`,
+              );
+              setAccessGranted(false);
+              return false;
+            }
+            staffDisplayName = (staffData.displayName || '').trim();
+          } else if (isGoogleProvider) {
+            await signOut(auth);
+            setLoginError(
+              `Akun Google (${currentUser.email}) belum terdaftar oleh Administrator Kecamatan Tarik. Hubungi Admin untuk mendaftarkan email Anda.`,
+            );
+            setAccessGranted(false);
+            return false;
+          }
+        } catch (err) {
+          if (isGoogleProvider) {
+            await signOut(auth);
+            setLoginError(
+              'Gagal memverifikasi status pendaftaran akun. Pastikan akun Anda telah didaftarkan oleh Administrator.',
+            );
+            setAccessGranted(false);
+            return false;
+          }
+          handleFirestoreError(err, OperationType.GET, staffPath);
+        }
+      }
+
+      const profilePath = `users/${currentUser.uid}`;
+      const profileRef = doc(db, 'users', currentUser.uid);
+      try {
+        const snap = await getDoc(profileRef);
+        const safeName = (
+          staffDisplayName ||
+          currentUser.displayName ||
+          currentUser.email ||
+          'Staf Kecamatan'
+        ).slice(0, 120);
+        const safeEmail = (currentUser.email || 'staff@kecamatantarik.go.id').slice(0, 180);
+        const safePhoto = (currentUser.photoURL || '').slice(0, 500);
+
+        if (!snap.exists()) {
+          await setDoc(profileRef, {
+            uid: currentUser.uid,
+            displayName: safeName,
+            email: safeEmail,
+            photoURL: safePhoto,
+            instansi: 'Pemerintah Kecamatan Tarik',
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+          setProfileName(safeName);
+          setProfileInstansi('Pemerintah Kecamatan Tarik');
+        } else {
+          const existingProfile = snap.data() as {
+            displayName?: string;
+            instansi?: string;
+          };
+          const resolvedName = (existingProfile.displayName || safeName).slice(0, 120);
+          const resolvedInstansi = (
+            existingProfile.instansi || 'Pemerintah Kecamatan Tarik'
+          ).slice(0, 160);
+          setProfileName(resolvedName);
+          setProfileInstansi(resolvedInstansi);
+          await updateDoc(profileRef, {
+            displayName: resolvedName,
+            email: safeEmail,
+            photoURL: safePhoto,
+            updatedAt: serverTimestamp(),
+          });
+        }
+        setAccessGranted(true);
+        setLoginError(null);
+        setLoginNotice(null);
+        return true;
+      } catch (err) {
+        setAccessGranted(false);
+        handleFirestoreError(err, OperationType.WRITE, profilePath);
+        return false;
+      }
+    } finally {
+      setIsCheckingAccess(false);
+      setAuthReady(true);
+    }
+  }, []);
+
+  // Sync Firebase Auth state, enforce admin-provisioned access, and ensure UserProfile document exists
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
-      setAuthReady(true);
 
-      if (currentUser) {
-        const profilePath = `users/${currentUser.uid}`;
-        const profileRef = doc(db, 'users', currentUser.uid);
-        try {
-          const snap = await getDoc(profileRef);
-          const safeName = (currentUser.displayName || currentUser.email || 'Staf Kecamatan').slice(0, 120);
-          const safeEmail = (currentUser.email || 'staff@kecamatan.go.id').slice(0, 180);
-          const safePhoto = (currentUser.photoURL || '').slice(0, 500);
-
-          if (!snap.exists()) {
-            await setDoc(profileRef, {
-              uid: currentUser.uid,
-              displayName: safeName,
-              email: safeEmail,
-              photoURL: safePhoto,
-              instansi: 'Pemerintah Kecamatan',
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp(),
-            });
-            setProfileName(safeName);
-            setProfileInstansi('Pemerintah Kecamatan');
-          } else {
-            const existingProfile = snap.data() as {
-              displayName?: string;
-              instansi?: string;
-            };
-            const resolvedName = (existingProfile.displayName || safeName).slice(0, 120);
-            const resolvedInstansi = (existingProfile.instansi || 'Pemerintah Kecamatan').slice(0, 160);
-            setProfileName(resolvedName);
-            setProfileInstansi(resolvedInstansi);
-            await updateDoc(profileRef, {
-              displayName: resolvedName,
-              email: safeEmail,
-              photoURL: safePhoto,
-              updatedAt: serverTimestamp(),
-            });
-          }
-        } catch (err) {
-          handleFirestoreError(err, OperationType.WRITE, profilePath);
+      if (!currentUser) {
+        const hasTempAdmin =
+          typeof window !== 'undefined' &&
+          sessionStorage.getItem(TEMP_ADMIN_STORAGE_KEY) === '1';
+        if (hasTempAdmin) {
+          setIsTempAdmin(true);
+          setAccessGranted(true);
+          setNeedsEmailVerification(false);
+          setIsCheckingAccess(false);
+          setAuthReady(true);
+          setProfileName('Administrator SILAPER');
+          setProfileInstansi('Pemerintah Kecamatan Tarik');
+          setSavedReports(readLocalReports());
+          return;
         }
-      } else {
+
+        setIsTempAdmin(false);
+        setAccessGranted(false);
+        setNeedsEmailVerification(false);
+        setIsCheckingAccess(false);
+        setAuthReady(true);
         setSavedReports([]);
+        setStaffList([]);
         setActiveReportId(null);
         setActiveReportOriginalStatus(null);
         setProfileName('Staf Kecamatan');
-        setProfileInstansi('Pemerintah Kecamatan');
+        setProfileInstansi('Pemerintah Kecamatan Tarik');
+        return;
       }
+
+      if (typeof window !== 'undefined') {
+        sessionStorage.removeItem(TEMP_ADMIN_STORAGE_KEY);
+      }
+      setIsTempAdmin(false);
+      await verifyAccessAndSyncProfile(currentUser);
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [verifyAccessAndSyncProfile]);
 
-  // Attach real-time Firestore listener ONLY when authReady && user is authenticated
+  // Attach real-time Firestore listener ONLY when authReady && user && accessGranted
   useEffect(() => {
-    if (!authReady || !user) return;
+    if (!authReady || !user || !accessGranted || isTempAdmin) return;
 
     setLoadingReports(true);
     const reportsPath = `users/${user.uid}/reports`;
@@ -277,26 +473,280 @@ export default function App() {
     );
 
     return () => unsubscribe();
-  }, [authReady, user]);
+  }, [authReady, user, accessGranted, isTempAdmin]);
+
+  // Attach real-time Firestore listener for Admin's authorizedStaff allowlist
+  useEffect(() => {
+    if (!authReady || !user || !accessGranted || !isAdminUser || isTempAdmin) return;
+
+    setLoadingStaff(true);
+    const staffPath = 'authorizedStaff';
+    const q = query(
+      collection(db, 'authorizedStaff'),
+      where('addedBy', '==', user.uid),
+    );
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const rows: AuthorizedStaff[] = snapshot.docs.map((docSnap) => {
+          const data = docSnap.data() as Omit<AuthorizedStaff, 'id'>;
+          return {
+            ...data,
+            id: docSnap.id,
+          };
+        });
+        rows.sort((a, b) => a.displayName.localeCompare(b.displayName));
+        setStaffList(rows);
+        setLoadingStaff(false);
+      },
+      (error) => {
+        setLoadingStaff(false);
+        handleFirestoreError(error, OperationType.LIST, staffPath);
+      },
+    );
+
+    return () => unsubscribe();
+  }, [authReady, user, accessGranted, isAdminUser, isTempAdmin]);
+
+  const handleLoginWithEmail = async (email: string, password: string) => {
+    setLoginError(null);
+    setLoginNotice(null);
+
+    if (email.trim().toLowerCase() === 'admin' && password === 'admin') {
+      try {
+        sessionStorage.setItem(TEMP_ADMIN_STORAGE_KEY, '1');
+      } catch {
+        // Ignore storage error
+      }
+      setIsTempAdmin(true);
+      setNeedsEmailVerification(false);
+      setAccessGranted(true);
+      setAuthReady(true);
+      setProfileName('Administrator SILAPER');
+      setProfileInstansi('Pemerintah Kecamatan Tarik');
+      setSavedReports(readLocalReports());
+      showToast('success', 'Masuk dengan akses penuh sementara (Admin).');
+      return;
+    }
+
+    setIsAuthSubmitting(true);
+    try {
+      await signInWithEmailAndPassword(auth, email.trim(), password);
+    } catch (err) {
+      setLoginError(mapFirebaseAuthError(err));
+    } finally {
+      setIsAuthSubmitting(false);
+    }
+  };
 
   const handleSignIn = async () => {
+    setLoginError(null);
+    setLoginNotice(null);
+    setIsAuthSubmitting(true);
     try {
       await signInWithPopup(auth, googleProvider);
-      showToast('success', 'Berhasil masuk ke akun staf Kecamatan.');
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Gagal masuk dengan Google.';
+      const msg = mapFirebaseAuthError(err);
+      setLoginError(msg);
       showToast('error', msg);
+    } finally {
+      setIsAuthSubmitting(false);
+    }
+  };
+
+  const handleResetPassword = async (email: string) => {
+    setLoginError(null);
+    setLoginNotice(null);
+    setIsAuthSubmitting(true);
+    try {
+      await sendPasswordResetEmail(auth, email.trim());
+      setLoginNotice(
+        `Tautan atur ulang kata sandi telah dikirim ke ${email.trim()}. Periksa kotak masuk atau folder spam email Anda.`,
+      );
+    } catch (err) {
+      setLoginError(mapFirebaseAuthError(err));
+    } finally {
+      setIsAuthSubmitting(false);
+    }
+  };
+
+  const handleResendVerification = async () => {
+    if (!auth.currentUser) return;
+    setLoginError(null);
+    setLoginNotice(null);
+    setIsAuthSubmitting(true);
+    try {
+      await sendEmailVerification(auth.currentUser);
+      setLoginNotice(
+        `Email verifikasi telah dikirim ke ${auth.currentUser.email}. Silakan klik tautan pada email lalu tekan tombol konfirmasi.`,
+      );
+    } catch (err) {
+      setLoginError(mapFirebaseAuthError(err));
+    } finally {
+      setIsAuthSubmitting(false);
+    }
+  };
+
+  const handleCheckVerification = async () => {
+    if (!auth.currentUser) return;
+    setLoginError(null);
+    setLoginNotice(null);
+    setIsAuthSubmitting(true);
+    try {
+      await auth.currentUser.reload();
+      await auth.currentUser.getIdToken(true);
+      if (!auth.currentUser.emailVerified) {
+        setLoginError(
+          'Email Anda belum terverifikasi. Pastikan Anda sudah mengklik tautan verifikasi pada kotak masuk email.',
+        );
+        return;
+      }
+      const verifiedUser = auth.currentUser;
+      setUser(verifiedUser);
+      const ok = await verifyAccessAndSyncProfile(verifiedUser);
+      if (ok) {
+        showToast('success', 'Verifikasi email berhasil. Selamat datang di SILAPER.');
+      }
+    } catch (err) {
+      setLoginError(mapFirebaseAuthError(err));
+    } finally {
+      setIsAuthSubmitting(false);
     }
   };
 
   const handleSignOut = async () => {
     setProfileMenuOpen(false);
     try {
-      await signOut(auth);
-      showToast('success', 'Sesi autentikasi telah diakhiri.');
+      if (typeof window !== 'undefined') {
+        sessionStorage.removeItem(TEMP_ADMIN_STORAGE_KEY);
+      }
+      setIsTempAdmin(false);
+      setAccessGranted(false);
+      if (auth.currentUser) {
+        await signOut(auth);
+      }
+      setActiveTab('editor');
+      setLoginError(null);
+      setLoginNotice(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Gagal keluar.';
       showToast('error', msg);
+    }
+  };
+
+  const handleAddAuthorizedStaff = async (input: {
+    email: string;
+    displayName: string;
+    jabatan: string;
+    nip: string;
+  }): Promise<boolean> => {
+    if (!isAdminUser) return false;
+    const cleanEmail = input.email.trim().toLowerCase().slice(0, STAFF_FIELD_LIMITS.email);
+    const cleanName = input.displayName.trim().slice(0, STAFF_FIELD_LIMITS.displayName);
+    const cleanJabatan = input.jabatan.trim().slice(0, STAFF_FIELD_LIMITS.jabatan);
+    const cleanNip = input.nip.trim().slice(0, STAFF_FIELD_LIMITS.nip);
+
+    const emailRegex = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
+    if (!emailRegex.test(cleanEmail)) {
+      showToast('error', 'Format email staf tidak valid.');
+      return false;
+    }
+
+    if (!user && isTempAdmin) {
+      setStaffList((prev) => {
+        const filtered = prev.filter((item) => item.id !== cleanEmail);
+        const next: AuthorizedStaff[] = [
+          ...filtered,
+          {
+            id: cleanEmail,
+            email: cleanEmail,
+            displayName: cleanName,
+            jabatan: cleanJabatan,
+            nip: cleanNip,
+            active: true,
+            addedBy: 'temp-admin',
+          },
+        ];
+        next.sort((a, b) => a.displayName.localeCompare(b.displayName));
+        return next;
+      });
+      showToast(
+        'success',
+        `Staf ${cleanEmail} ditambahkan di sesi sementara. Untuk simpan permanen ke database, masuk dengan akun Google Admin.`,
+      );
+      return true;
+    }
+
+    if (!user) return false;
+    const staffPath = `authorizedStaff/${cleanEmail}`;
+    try {
+      await setDoc(doc(db, 'authorizedStaff', cleanEmail), {
+        email: cleanEmail,
+        displayName: cleanName,
+        jabatan: cleanJabatan,
+        nip: cleanNip,
+        active: true,
+        addedBy: user.uid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      showToast('success', `Akun staf ${cleanEmail} berhasil didaftarkan.`);
+      return true;
+    } catch (err) {
+      handleFirestoreError(err, OperationType.CREATE, staffPath);
+      return false;
+    }
+  };
+
+  const handleToggleStaffActive = async (staff: AuthorizedStaff) => {
+    if (!isAdminUser) return;
+    if (!user && isTempAdmin) {
+      setStaffList((prev) =>
+        prev.map((item) =>
+          item.id === staff.id ? { ...item, active: !item.active } : item,
+        ),
+      );
+      showToast(
+        'success',
+        !staff.active
+          ? `Akun ${staff.email} diaktifkan kembali (sesi sementara).`
+          : `Akun ${staff.email} dinonaktifkan (sesi sementara).`,
+      );
+      return;
+    }
+    if (!user) return;
+    const staffPath = `authorizedStaff/${staff.id}`;
+    try {
+      await updateDoc(doc(db, 'authorizedStaff', staff.id), {
+        active: !staff.active,
+        updatedAt: serverTimestamp(),
+      });
+      showToast(
+        'success',
+        !staff.active
+          ? `Akun ${staff.email} diaktifkan kembali.`
+          : `Akun ${staff.email} dinonaktifkan.`,
+      );
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, staffPath);
+    }
+  };
+
+  const handleDeleteAuthorizedStaff = async (staffId: string) => {
+    if (!isAdminUser) return;
+    if (!user && isTempAdmin) {
+      setStaffList((prev) => prev.filter((item) => item.id !== staffId));
+      showToast('success', `Akun ${staffId} dihapus dari daftar sesi sementara.`);
+      return;
+    }
+    if (!user) return;
+    const staffPath = `authorizedStaff/${staffId}`;
+    try {
+      await deleteDoc(doc(db, 'authorizedStaff', staffId));
+      showToast('success', `Akun ${staffId} dihapus dari daftar staf terdaftar.`);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, staffPath);
     }
   };
 
@@ -406,16 +856,44 @@ export default function App() {
   const handleSaveToArchive = async () => {
     if (!validateRequiredReportSections()) return;
 
-    if (!user) {
-      await handleSignIn();
-      return;
-    }
-
     if (!report.nomorSpt.trim() || !report.namaPegawai.trim()) {
       showToast(
         'error',
         'Nomor SPT dan Nama Pegawai wajib terisi sebelum menyimpan ke arsip.',
       );
+      return;
+    }
+
+    if (!user && isTempAdmin) {
+      const sanitizedLocal = sanitizeReportForFirestore(
+        { ...report, status: 'draft' },
+        'temp-admin',
+      );
+      const targetId =
+        activeReportId ||
+        `rep_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const entry: StoredTravelReport = {
+        ...sanitizedLocal,
+        id: targetId,
+      };
+      setSavedReports((prev) => {
+        const next = [entry, ...prev.filter((r) => r.id !== targetId)];
+        writeLocalReports(next);
+        return next;
+      });
+      setActiveReportId(targetId);
+      setActiveReportOriginalStatus('draft');
+      showToast(
+        'success',
+        activeReportId
+          ? 'Perubahan laporan diperbarui di arsip lokal sesi Admin.'
+          : 'Laporan baru tersimpan di arsip lokal sesi Admin.',
+      );
+      return;
+    }
+
+    if (!user) {
+      await handleSignIn();
       return;
     }
 
@@ -482,10 +960,32 @@ export default function App() {
   };
 
   const handleToggleArchiveStatus = async (stored: StoredTravelReport) => {
+    const nextStatus: StoredTravelReport['status'] =
+      stored.status === 'final' ? 'draft' : 'final';
+    if (!user && isTempAdmin) {
+      setSavedReports((prev) => {
+        const next = prev.map((item) =>
+          item.id === stored.id ? { ...item, status: nextStatus } : item,
+        );
+        writeLocalReports(next);
+        return next;
+      });
+      if (activeReportId === stored.id) {
+        setActiveReportOriginalStatus(nextStatus);
+        setReport((prev) => ({ ...prev, status: nextStatus }));
+      }
+      showToast(
+        'success',
+        nextStatus === 'final'
+          ? `Laporan ${stored.nomorSpt} ditandai Final.`
+          : `Laporan ${stored.nomorSpt} dibuka kembali sebagai Draf.`,
+      );
+      return;
+    }
+
     if (!user) return;
     const docPath = `users/${user.uid}/reports/${stored.id}`;
     const docRef = doc(db, 'users', user.uid, 'reports', stored.id);
-    const nextStatus = stored.status === 'final' ? 'draft' : 'final';
     try {
       await updateDoc(docRef, {
         status: nextStatus,
@@ -507,6 +1007,20 @@ export default function App() {
   };
 
   const handleDeleteArchive = async (reportId: string) => {
+    if (!user && isTempAdmin) {
+      setSavedReports((prev) => {
+        const next = prev.filter((item) => item.id !== reportId);
+        writeLocalReports(next);
+        return next;
+      });
+      if (activeReportId === reportId) {
+        setActiveReportId(null);
+        setActiveReportOriginalStatus(null);
+      }
+      showToast('success', 'Laporan berhasil dihapus dari arsip lokal.');
+      return;
+    }
+
     if (!user) return;
     const docPath = `users/${user.uid}/reports/${reportId}`;
     try {
@@ -587,7 +1101,59 @@ export default function App() {
       label: 'Panduan SPT',
       icon: <BookOpen className="w-4 h-4 shrink-0" />,
     },
+    ...(isAdminUser
+      ? [
+          {
+            id: 'staff' as ActiveTab,
+            label: 'Kelola Akun Staf',
+            icon: <UserCheck className="w-4 h-4 shrink-0" />,
+          },
+        ]
+      : []),
   ];
+
+  if (!isTempAdmin && (!authReady || isCheckingAccess)) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-[#F4F6F9] text-[#0F172A] px-6">
+        <div className="flex items-center gap-3 mb-4">
+          <img
+            src="/assets/aistudio/image_08502736.png"
+            alt="Logo Resmi Kabupaten Sidoarjo"
+            referrerPolicy="no-referrer"
+            onError={(e) => {
+              e.currentTarget.style.display = 'none';
+            }}
+            className="w-10 h-10 object-contain"
+          />
+          <span className="text-xl font-bold tracking-tight text-[#0F2A56] font-display">
+            SILAPER
+          </span>
+        </div>
+        <div className="inline-flex items-center gap-2 text-xs text-[#475569]">
+          <Loader2 className="w-4 h-4 animate-spin text-[#0F2A56]" />
+          <span>Memeriksa sesi autentikasi staf...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isTempAdmin && (!user || !accessGranted || needsEmailVerification)) {
+    return (
+      <LoginPage
+        onLoginWithEmail={handleLoginWithEmail}
+        onLoginWithGoogle={handleSignIn}
+        onResetPassword={handleResetPassword}
+        onResendVerification={handleResendVerification}
+        onCheckVerification={handleCheckVerification}
+        onCancelVerification={handleSignOut}
+        needsEmailVerification={needsEmailVerification}
+        pendingUserEmail={user?.email || ''}
+        authError={loginError}
+        authNotice={loginNotice}
+        isSubmitting={isAuthSubmitting}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col lg:flex-row bg-[#F4F6F9] text-[#0F172A]">
@@ -658,7 +1224,7 @@ export default function App() {
                     {item.icon}
                     <span>{item.label}</span>
                   </span>
-                  {item.id === 'archive' && user && savedReports.length > 0 && (
+                  {item.id === 'archive' && (user || isTempAdmin) && savedReports.length > 0 && (
                     <span
                       className={`text-xs tabular-nums ${
                         isActive ? 'text-[#0F2A56]' : 'text-slate-300'
@@ -675,42 +1241,26 @@ export default function App() {
 
         {/* Bottom User Auth Zone */}
         <div className="p-4 border-t border-white/10">
-          {user ? (
-            <div className="space-y-3">
-              <div className="px-1">
-                <p className="text-xs font-semibold text-white truncate">
-                  {profileName}
-                </p>
-                {user.email && (
-                  <p className="text-[11px] text-slate-300 truncate mt-0.5">
-                    {user.email}
-                  </p>
-                )}
-              </div>
-              <button
-                type="button"
-                onClick={handleSignOut}
-                className="w-full inline-flex items-center justify-center gap-2 px-3.5 py-2 text-xs font-semibold text-[#0F2A56] bg-white rounded-md hover:bg-slate-100 transition-colors whitespace-nowrap"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                Keluar
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-2.5">
-              <p className="text-[11px] text-slate-300 leading-relaxed px-1">
-                Masuk untuk menyimpan dan mengelola arsip laporan rahasia Anda.
+          <div className="space-y-3">
+            <div className="px-1">
+              <p className="text-xs font-semibold text-white truncate">
+                {profileName}
               </p>
-              <button
-                type="button"
-                onClick={handleSignIn}
-                className="w-full inline-flex items-center justify-center gap-2 px-3.5 py-2 text-xs font-semibold text-[#0F2A56] bg-white rounded-md hover:bg-slate-100 transition-colors whitespace-nowrap"
-              >
-                <LogIn className="w-3.5 h-3.5" />
-                Masuk Google
-              </button>
+              {(user?.email || isTempAdmin) && (
+                <p className="text-[11px] text-slate-300 truncate mt-0.5">
+                  {user?.email || 'Akses Sementara (admin)'}
+                </p>
+              )}
             </div>
-          )}
+            <button
+              type="button"
+              onClick={handleSignOut}
+              className="w-full inline-flex items-center justify-center gap-2 px-3.5 py-2 text-xs font-semibold text-[#0F2A56] bg-white rounded-md hover:bg-slate-100 transition-colors whitespace-nowrap"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              Keluar
+            </button>
+          </div>
         </div>
       </aside>
 
@@ -763,7 +1313,9 @@ export default function App() {
                   ? 'Editor Laporan Perjalanan Dinas'
                   : activeTab === 'archive'
                     ? 'Arsip Tersimpan'
-                    : 'Panduan SPT'}
+                    : activeTab === 'staff'
+                      ? 'Kelola Akun Staf'
+                      : 'Panduan SPT'}
               </span>
             )}
           </div>
@@ -810,46 +1362,15 @@ export default function App() {
                   <span>Edit Profile</span>
                 </button>
 
-                {user ? (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={handleSignOut}
-                    className="w-full flex items-center gap-2.5 px-3.5 py-2 text-xs font-medium text-[#DC2626] hover:bg-[#FEF2F2] transition-colors text-left"
-                  >
-                    <LogOut className="w-3.5 h-3.5" />
-                    <span>Keluar</span>
-                  </button>
-                ) : (
-                  <>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      onClick={() => {
-                        setProfileMenuOpen(false);
-                        handleSignIn();
-                      }}
-                      className="w-full flex items-center gap-2.5 px-3.5 py-2 text-xs font-medium text-[#0F2A56] hover:bg-[#EFF6FF] transition-colors text-left"
-                    >
-                      <LogIn className="w-3.5 h-3.5" />
-                      <span>Masuk Google</span>
-                    </button>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      onClick={() => {
-                        setProfileMenuOpen(false);
-                        setProfileName('Staf Kecamatan');
-                        setProfileInstansi('Pemerintah Kecamatan');
-                        showToast('success', 'Sesi profil tamu direset.');
-                      }}
-                      className="w-full flex items-center gap-2.5 px-3.5 py-2 text-xs font-medium text-[#DC2626] hover:bg-[#FEF2F2] transition-colors text-left"
-                    >
-                      <LogOut className="w-3.5 h-3.5" />
-                      <span>Keluar</span>
-                    </button>
-                  </>
-                )}
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={handleSignOut}
+                  className="w-full flex items-center gap-2.5 px-3.5 py-2 text-xs font-medium text-[#DC2626] hover:bg-[#FEF2F2] transition-colors text-left"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>Keluar</span>
+                </button>
               </div>
             )}
           </div>
@@ -861,10 +1382,8 @@ export default function App() {
             <div className="px-6 py-3 flex flex-wrap items-center justify-between gap-4">
               <div className="flex items-center gap-2 text-xs text-[#475569]">
                 <span className="font-semibold text-[#0F172A]">
-                  Sistem Otomasi Laporan Perjalanan Dinas
+                  Sistem Laporan Perjalanan Dinas Kecamatan Tarik
                 </span>
-                <span aria-hidden="true">·</span>
-                <span>Tingkat Kecamatan</span>
                 {activeReportId && (
                   <>
                     <span aria-hidden="true">·</span>
@@ -1019,7 +1538,8 @@ export default function App() {
           {activeTab === 'archive' && (
             <ArchivePanel
               user={user}
-              authReady={authReady}
+              authReady={authReady || isTempAdmin}
+              isTempAdmin={isTempAdmin}
               reports={savedReports}
               loadingReports={loadingReports}
               activeReportId={activeReportId}
@@ -1035,6 +1555,17 @@ export default function App() {
           )}
 
           {activeTab === 'guide' && <GuidePanel />}
+
+          {activeTab === 'staff' && isAdminUser && (
+            <StaffAdminPanel
+              staffList={staffList}
+              loadingStaff={loadingStaff}
+              adminEmail={ADMIN_EMAIL}
+              onAddStaff={handleAddAuthorizedStaff}
+              onToggleStaffActive={handleToggleStaffActive}
+              onDeleteStaff={handleDeleteAuthorizedStaff}
+            />
+          )}
         </main>
       </div>
 

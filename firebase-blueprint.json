@@ -221,6 +221,58 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "AuthorizedStaff": {
+      "title": "AuthorizedStaff",
+      "description": "Admin-provisioned staff account allowlist controlling access to SILAPER Kecamatan Tarik.",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Lowercase email address authorized by Admin",
+          "minLength": 3,
+          "maxLength": 180
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Full name of the authorized staff member",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "jabatan": {
+          "type": "string",
+          "description": "Position title in Kecamatan Tarik",
+          "maxLength": 160
+        },
+        "nip": {
+          "type": "string",
+          "description": "Employee NIP",
+          "maxLength": 60
+        },
+        "active": {
+          "type": "boolean",
+          "description": "Whether the staff account is active"
+        },
+        "addedBy": {
+          "type": "string",
+          "description": "Admin UID who added the staff entry",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp"
+        }
+      },
+      "required": ["email", "displayName", "jabatan", "nip", "active", "addedBy", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -231,6 +283,10 @@
     "/users/{userId}/reports/{reportId}": {
       "schema": { "$ref": "#/entities/TravelReport" },
       "description": "Confidential travel reports owned by the authenticated staff member."
+    },
+    "/authorizedStaff/{staffId}": {
+      "schema": { "$ref": "#/entities/AuthorizedStaff" },
+      "description": "Admin-managed allowlist of authorized staff emails (keyed by lowercase email)."
     }
   }
 }
