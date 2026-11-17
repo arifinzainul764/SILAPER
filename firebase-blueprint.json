@@ -1,0 +1,236 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated district staff profile stored strictly for the owning user.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Full name of the authenticated staff member",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified email address of the staff member",
+          "minLength": 3,
+          "maxLength": 180
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Profile avatar URL",
+          "maxLength": 500
+        },
+        "instansi": {
+          "type": "string",
+          "description": "Default district office name",
+          "maxLength": 160
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp"
+        }
+      },
+      "required": ["uid", "displayName", "email", "createdAt", "updatedAt"]
+    },
+    "TravelReport": {
+      "title": "TravelReport",
+      "description": "Official district travel report (Laporan Perjalanan Dinas) owned by a single authenticated staff member.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Owner UID matching Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "namaKabupaten": {
+          "type": "string",
+          "description": "District / Regency government header name",
+          "maxLength": 160
+        },
+        "namaKecamatan": {
+          "type": "string",
+          "description": "Sub-district (Kecamatan) name",
+          "maxLength": 160
+        },
+        "alamatKecamatan": {
+          "type": "string",
+          "description": "Sub-district office address and contact line",
+          "maxLength": 250
+        },
+        "nomorSpt": {
+          "type": "string",
+          "description": "Official Surat Perintah Tugas number",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "tanggalSpt": {
+          "type": "string",
+          "description": "Date of the Surat Perintah Tugas",
+          "maxLength": 60
+        },
+        "dasarHukum": {
+          "type": "string",
+          "description": "Legal basis extracted from SPT",
+          "maxLength": 2000
+        },
+        "namaPegawai": {
+          "type": "string",
+          "description": "Assigned official full name",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "nip": {
+          "type": "string",
+          "description": "Civil servant NIP",
+          "maxLength": 60
+        },
+        "pangkatGolongan": {
+          "type": "string",
+          "description": "Civil servant rank and grade",
+          "maxLength": 100
+        },
+        "jabatan": {
+          "type": "string",
+          "description": "Official position title",
+          "maxLength": 160
+        },
+        "tujuan": {
+          "type": "string",
+          "description": "Destination location",
+          "maxLength": 240
+        },
+        "maksudPerjalanan": {
+          "type": "string",
+          "description": "Purpose and assignment details",
+          "maxLength": 2000
+        },
+        "tanggalBerangkat": {
+          "type": "string",
+          "description": "Departure date",
+          "maxLength": 60
+        },
+        "tanggalKembali": {
+          "type": "string",
+          "description": "Return date",
+          "maxLength": 60
+        },
+        "hasilPelaksanaan": {
+          "type": "string",
+          "description": "Detailed field execution findings",
+          "maxLength": 4000
+        },
+        "kesimpulanSaran": {
+          "type": "string",
+          "description": "Conclusions and follow-up recommendations",
+          "maxLength": 2500
+        },
+        "penutup": {
+          "type": "string",
+          "description": "Formal closing statement",
+          "maxLength": 1500
+        },
+        "tempatLaporan": {
+          "type": "string",
+          "description": "Place where report is signed",
+          "maxLength": 120
+        },
+        "tanggalLaporan": {
+          "type": "string",
+          "description": "Date when report is signed",
+          "maxLength": 60
+        },
+        "namaCamat": {
+          "type": "string",
+          "description": "Approving Camat full name",
+          "maxLength": 160
+        },
+        "nipCamat": {
+          "type": "string",
+          "description": "Approving Camat NIP",
+          "maxLength": 60
+        },
+        "pangkatCamat": {
+          "type": "string",
+          "description": "Approving Camat rank",
+          "maxLength": 100
+        },
+        "status": {
+          "type": "string",
+          "description": "Lifecycle status of the travel report",
+          "enum": ["draft", "final"]
+        },
+        "photos": {
+          "type": "array",
+          "description": "Up to 4 compressed documentation photos with captions"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp"
+        }
+      },
+      "required": [
+        "ownerId",
+        "namaKabupaten",
+        "namaKecamatan",
+        "alamatKecamatan",
+        "nomorSpt",
+        "tanggalSpt",
+        "dasarHukum",
+        "namaPegawai",
+        "nip",
+        "pangkatGolongan",
+        "jabatan",
+        "tujuan",
+        "maksudPerjalanan",
+        "tanggalBerangkat",
+        "tanggalKembali",
+        "hasilPelaksanaan",
+        "kesimpulanSaran",
+        "penutup",
+        "tempatLaporan",
+        "tanggalLaporan",
+        "namaCamat",
+        "nipCamat",
+        "pangkatCamat",
+        "status",
+        "photos",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profile documents isolated per authenticated staff UID."
+    },
+    "/users/{userId}/reports/{reportId}": {
+      "schema": { "$ref": "#/entities/TravelReport" },
+      "description": "Confidential travel reports owned by the authenticated staff member."
+    }
+  }
+}

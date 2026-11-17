@@ -1,0 +1,166 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Hardened Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    // Validation Blueprint: UserProfile
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'email', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'email', 'photoURL', 'instansi', 'createdAt', 'updatedAt'])
+        && data.uid is string && data.uid == request.auth.uid && data.uid == userId && isValidId(data.uid)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 180
+        && (!data.keys().hasAny(['photoURL']) || (data.photoURL is string && data.photoURL.size() <= 500))
+        && (!data.keys().hasAny(['instansi']) || (data.instansi is string && data.instansi.size() <= 160))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: Photo Item inside bounded photos array
+    function isValidPhotoItem(item) {
+      return item is map
+        && item.keys().hasAll(['id', 'name', 'caption', 'dataUrl'])
+        && item.keys().hasOnly(['id', 'name', 'caption', 'dataUrl'])
+        && item.id is string && item.id.size() >= 1 && item.id.size() <= 64
+        && item.name is string && item.name.size() <= 160
+        && item.caption is string && item.caption.size() <= 240
+        && item.dataUrl is string && item.dataUrl.size() <= 220000;
+    }
+
+    // Validation Blueprint: TravelReport
+    function isValidTravelReport(data, userId) {
+      return data.keys().hasAll([
+          'ownerId', 'namaKabupaten', 'namaKecamatan', 'alamatKecamatan',
+          'nomorSpt', 'tanggalSpt', 'dasarHukum', 'namaPegawai', 'nip',
+          'pangkatGolongan', 'jabatan', 'tujuan', 'maksudPerjalanan',
+          'tanggalBerangkat', 'tanggalKembali', 'hasilPelaksanaan',
+          'kesimpulanSaran', 'penutup', 'tempatLaporan', 'tanggalLaporan',
+          'namaCamat', 'nipCamat', 'pangkatCamat', 'status', 'photos',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'namaKabupaten', 'namaKecamatan', 'alamatKecamatan',
+          'nomorSpt', 'tanggalSpt', 'dasarHukum', 'namaPegawai', 'nip',
+          'pangkatGolongan', 'jabatan', 'tujuan', 'maksudPerjalanan',
+          'tanggalBerangkat', 'tanggalKembali', 'hasilPelaksanaan',
+          'kesimpulanSaran', 'penutup', 'tempatLaporan', 'tanggalLaporan',
+          'namaCamat', 'nipCamat', 'pangkatCamat', 'status', 'photos',
+          'createdAt', 'updatedAt'
+        ])
+        && data.ownerId is string && data.ownerId == request.auth.uid && data.ownerId == userId && isValidId(data.ownerId)
+        && data.namaKabupaten is string && data.namaKabupaten.size() <= 160
+        && data.namaKecamatan is string && data.namaKecamatan.size() <= 160
+        && data.alamatKecamatan is string && data.alamatKecamatan.size() <= 250
+        && data.nomorSpt is string && data.nomorSpt.size() >= 1 && data.nomorSpt.size() <= 120
+        && data.tanggalSpt is string && data.tanggalSpt.size() <= 60
+        && data.dasarHukum is string && data.dasarHukum.size() <= 2000
+        && data.namaPegawai is string && data.namaPegawai.size() >= 1 && data.namaPegawai.size() <= 160
+        && data.nip is string && data.nip.size() <= 60
+        && data.pangkatGolongan is string && data.pangkatGolongan.size() <= 100
+        && data.jabatan is string && data.jabatan.size() <= 160
+        && data.tujuan is string && data.tujuan.size() <= 240
+        && data.maksudPerjalanan is string && data.maksudPerjalanan.size() <= 2000
+        && data.tanggalBerangkat is string && data.tanggalBerangkat.size() <= 60
+        && data.tanggalKembali is string && data.tanggalKembali.size() <= 60
+        && data.hasilPelaksanaan is string && data.hasilPelaksanaan.size() <= 4000
+        && data.kesimpulanSaran is string && data.kesimpulanSaran.size() <= 2500
+        && data.penutup is string && data.penutup.size() <= 1500
+        && data.tempatLaporan is string && data.tempatLaporan.size() <= 120
+        && data.tanggalLaporan is string && data.tanggalLaporan.size() <= 60
+        && data.namaCamat is string && data.namaCamat.size() <= 160
+        && data.nipCamat is string && data.nipCamat.size() <= 60
+        && data.pangkatCamat is string && data.pangkatCamat.size() <= 100
+        && data.status is string && data.status in ['draft', 'final']
+        && data.photos is list && data.photos.size() <= 4
+        && (data.photos.size() == 0 || isValidPhotoItem(data.photos[0]))
+        && (data.photos.size() <= 1 || isValidPhotoItem(data.photos[1]))
+        && (data.photos.size() <= 2 || isValidPhotoItem(data.photos[2]))
+        && (data.photos.size() <= 3 || isValidPhotoItem(data.photos[3]))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'photoURL', 'instansi', 'updatedAt']);
+      allow delete: if false;
+
+      match /reports/{reportId} {
+        allow get: if isValidId(userId) && isValidId(reportId) && isOwner(userId);
+        allow list: if isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(reportId)
+          && isOwner(userId)
+          && isValidTravelReport(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+        allow update: if isValidId(userId)
+          && isValidId(reportId)
+          && isOwner(userId)
+          && isValidTravelReport(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && (
+            (existing().status == 'draft' && incoming().diff(existing()).affectedKeys().hasOnly([
+              'namaKabupaten', 'namaKecamatan', 'alamatKecamatan',
+              'nomorSpt', 'tanggalSpt', 'dasarHukum', 'namaPegawai', 'nip',
+              'pangkatGolongan', 'jabatan', 'tujuan', 'maksudPerjalanan',
+              'tanggalBerangkat', 'tanggalKembali', 'hasilPelaksanaan',
+              'kesimpulanSaran', 'penutup', 'tempatLaporan', 'tanggalLaporan',
+              'namaCamat', 'nipCamat', 'pangkatCamat', 'status', 'photos',
+              'updatedAt'
+            ]))
+            || (existing().status == 'final' && incoming().status == 'draft' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+          );
+        allow delete: if isValidId(userId)
+          && isValidId(reportId)
+          && isOwner(userId)
+          && existing().ownerId == request.auth.uid;
+      }
+    }
+  }
+}

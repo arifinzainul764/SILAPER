@@ -1,0 +1,6 @@
+{
+  "name": "SIMLAPPD — Sistem Otomasi Laporan Perjalanan Dinas",
+  "description": "Sistem otomasi pembuatan Laporan Perjalanan Dinas instansi pemerintahan tingkat kecamatan berbasis ekstraksi PDF SPT, pratinjau A4 resmi, dan ekspor DOCX/PDF.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

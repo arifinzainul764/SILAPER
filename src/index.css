@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: "Public Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+    background-color: #F4F6F9;
+    color: #0F172A;
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+
+  .font-mono-tabular {
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .font-official-doc {
+    font-family: "Source Serif 4", "Times New Roman", Georgia, serif;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Official A4 Paper Sheet Styles */
+.a4-sheet {
+  width: 210mm;
+  min-height: 297mm;
+  padding: 18mm 20mm 18mm 22mm;
+  background-color: #FFFFFF;
+  color: #0F172A;
+  box-shadow: 0 4px 24px rgba(15, 42, 86, 0.08), 0 1px 3px rgba(15, 23, 42, 0.06);
+}
+
+@media screen and (max-width: 1280px) {
+  .a4-sheet-wrapper {
+    overflow-x: auto;
+  }
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 15mm 18mm 15mm 20mm;
+  }
+
+  html,
+  body {
+    background: #FFFFFF !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-only-container {
+    display: block !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #FFFFFF !important;
+    overflow: visible !important;
+  }
+
+  .a4-sheet {
+    width: 100% !important;
+    min-height: auto !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
+  }
+
+  .print-page-break {
+    page-break-before: always;
+    break-before: page;
+  }
+}
