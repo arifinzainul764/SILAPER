@@ -104,16 +104,40 @@ export const ReportForm: React.FC<ReportFormProps> = ({
       }
 
       if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error(
+            'Endpoint /api/extract-spt tidak ditemukan di server (HTTP 404). Pastikan folder api/ dan vercel.json ikut ter-deploy.',
+          );
+        }
+        if (response.status === 413) {
+          throw new Error(
+            'Ukuran file PDF melebihi batas upload server (HTTP 413, maks. ±3 MB pada hosting serverless). Silakan kompres PDF SPT terlebih dahulu.',
+          );
+        }
         if (response.status === 503) {
           throw new Error(
             payload?.error ||
-              'Server AI sedang sibuk (503 UNAVAILABLE). Silakan klik "Coba Lagi" dalam beberapa detik.',
+              'Server AI belum dikonfigurasi (GEMINI_API_KEY) atau sedang sibuk (503 UNAVAILABLE).',
           );
         }
-        throw new Error(payload?.error || 'Gagal mengekstrak data dari file PDF SPT.');
+        if (response.status === 502 || response.status === 504) {
+          throw new Error(
+            payload?.error ||
+              `Server kehabisan waktu tunggu saat memproses PDF (HTTP ${response.status}). Silakan klik "Coba Lagi".`,
+          );
+        }
+        throw new Error(
+          payload?.error || `Gagal mengekstrak data dari file PDF SPT (HTTP ${response.status}).`,
+        );
       }
 
-      const extracted = (payload.extracted || {}) as Partial<TravelReportData>;
+      if (!payload || typeof payload.extracted !== 'object' || payload.extracted === null) {
+        throw new Error(
+          'Respons server bukan JSON yang valid (kemungkinan rute /api/extract-spt belum aktif di hosting).',
+        );
+      }
+
+      const extracted = payload.extracted;
       onApplyExtractedSpt(extracted, file.name);
       setExtractStatus({
         type: 'success',
