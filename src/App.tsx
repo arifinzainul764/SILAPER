@@ -803,31 +803,88 @@ export default function App() {
     }));
   };
 
+  const clampMaxOneA4Line = (rawText?: string, maxChars = 74): string => {
+    const cleaned = (rawText || '').replace(/\r\n/g, '\n').trim();
+    if (!cleaned) return '';
+    const firstLine = (
+      cleaned
+        .split('\n')
+        .map((line) => line.trim())
+        .find(Boolean) || cleaned
+    )
+      .replace(/^\d+\.\s*/, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const boundaryMatch = firstLine.match(/[a-z]{3,}[.!?](?=\s+[A-Z])/);
+    const singleSentence =
+      boundaryMatch && boundaryMatch.index !== undefined
+        ? firstLine.slice(0, boundaryMatch.index + boundaryMatch[0].length).trim()
+        : firstLine;
+
+    if (singleSentence.length <= maxChars) {
+      return singleSentence;
+    }
+
+    const slice = singleSentence.slice(0, maxChars - 1);
+    const lastSpace = slice.lastIndexOf(' ');
+    const trimmed = (lastSpace > 25 ? slice.slice(0, lastSpace) : slice)
+      .replace(/[,;:\s]+$/, '')
+      .trim();
+    return trimmed.endsWith('.') ? trimmed : `${trimmed}.`;
+  };
+
   const handleApplyExtractedSpt = (
     extracted: Partial<TravelReportData>,
     _sourceFileName: string,
   ) => {
-    setReport((prev) => ({
-      ...prev,
-      namaKabupaten: extracted.namaKabupaten || prev.namaKabupaten,
-      namaKecamatan: extracted.namaKecamatan || prev.namaKecamatan,
-      alamatKecamatan: extracted.alamatKecamatan || prev.alamatKecamatan,
-      nomorSpt: extracted.nomorSpt || prev.nomorSpt,
-      tanggalSpt: extracted.tanggalSpt || prev.tanggalSpt,
-      dasarHukum: extracted.dasarHukum || prev.dasarHukum,
-      namaPegawai: extracted.namaPegawai || prev.namaPegawai,
-      nip: extracted.nip || prev.nip,
-      pangkatGolongan: extracted.pangkatGolongan || prev.pangkatGolongan,
-      jabatan: extracted.jabatan || prev.jabatan,
-      tujuan: extracted.tujuan || prev.tujuan,
-      maksudPerjalanan: extracted.maksudPerjalanan || prev.maksudPerjalanan,
-      tanggalBerangkat: extracted.tanggalBerangkat || extracted.tanggalSpt || prev.tanggalBerangkat,
-      tanggalKembali: extracted.tanggalKembali || extracted.tanggalSpt || prev.tanggalKembali,
-      tempatLaporan: extracted.tempatLaporan || prev.tempatLaporan,
-      namaCamat: extracted.namaCamat || prev.namaCamat,
-      nipCamat: extracted.nipCamat || prev.nipCamat,
-      pangkatCamat: extracted.pangkatCamat || prev.pangkatCamat,
-    }));
+    setReport((prev) => {
+      const resolvedTujuan = (extracted.tujuan || prev.tujuan || '').split(',')[0].trim();
+      const candidateHasil = resolvedTujuan
+        ? `Kegiatan di ${resolvedTujuan} telah dilaksanakan dengan tertib dan lancar.`
+        : '';
+      const fallbackHasil =
+        candidateHasil && candidateHasil.length <= 74
+          ? candidateHasil
+          : 'Kegiatan perjalanan dinas sesuai SPT telah dilaksanakan dengan lancar.';
+
+      const candidateKesimpulan = resolvedTujuan
+        ? `Pelaksanaan tugas di ${resolvedTujuan} berjalan sesuai rencana dan tertib.`
+        : '';
+      const fallbackKesimpulan =
+        candidateKesimpulan && candidateKesimpulan.length <= 74
+          ? candidateKesimpulan
+          : 'Pelaksanaan tugas berjalan sesuai rencana dan agar segera ditindaklanjuti.';
+
+      const generatedHasil = clampMaxOneA4Line(extracted.hasilPelaksanaan) || fallbackHasil;
+      const generatedKesimpulan =
+        clampMaxOneA4Line(extracted.kesimpulanSaran) || fallbackKesimpulan;
+
+      return {
+        ...prev,
+        namaKabupaten: extracted.namaKabupaten || prev.namaKabupaten,
+        namaKecamatan: extracted.namaKecamatan || prev.namaKecamatan,
+        alamatKecamatan: extracted.alamatKecamatan || prev.alamatKecamatan,
+        nomorSpt: extracted.nomorSpt || prev.nomorSpt,
+        tanggalSpt: extracted.tanggalSpt || prev.tanggalSpt,
+        dasarHukum: extracted.dasarHukum || prev.dasarHukum,
+        namaPegawai: extracted.namaPegawai || prev.namaPegawai,
+        nip: extracted.nip || prev.nip,
+        pangkatGolongan: extracted.pangkatGolongan || prev.pangkatGolongan,
+        jabatan: extracted.jabatan || prev.jabatan,
+        tujuan: extracted.tujuan || prev.tujuan,
+        maksudPerjalanan: extracted.maksudPerjalanan || prev.maksudPerjalanan,
+        tanggalBerangkat: extracted.tanggalBerangkat || extracted.tanggalSpt || prev.tanggalBerangkat,
+        tanggalKembali: extracted.tanggalKembali || extracted.tanggalSpt || prev.tanggalKembali,
+        hasilPelaksanaan: generatedHasil,
+        kesimpulanSaran: generatedKesimpulan,
+        tempatLaporan: extracted.tempatLaporan || prev.tempatLaporan,
+        namaCamat: extracted.namaCamat || prev.namaCamat,
+        nipCamat: extracted.nipCamat || prev.nipCamat,
+        pangkatCamat: extracted.pangkatCamat || prev.pangkatCamat,
+      };
+    });
+    setShowRequiredErrors(false);
     // Default locked status after extraction to prevent accidental edits
     setIsUnlocked(false);
   };

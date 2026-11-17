@@ -85,6 +85,41 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const MAX_A4_LINE_CHARS = 74;
+
+function clampMaxOneA4Line(rawText: unknown, maxChars = MAX_A4_LINE_CHARS): string {
+  if (typeof rawText !== 'string') return '';
+  const cleaned = rawText.replace(/\r\n/g, '\n').trim();
+  if (!cleaned) return '';
+
+  const firstLine = (
+    cleaned
+      .split('\n')
+      .map((line) => line.trim())
+      .find(Boolean) || cleaned
+  )
+    .replace(/^\d+\.\s*/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const boundaryMatch = firstLine.match(/[a-z]{3,}[.!?](?=\s+[A-Z])/);
+  const singleSentence =
+    boundaryMatch && boundaryMatch.index !== undefined
+      ? firstLine.slice(0, boundaryMatch.index + boundaryMatch[0].length).trim()
+      : firstLine;
+
+  if (singleSentence.length <= maxChars) {
+    return singleSentence;
+  }
+
+  const slice = singleSentence.slice(0, maxChars - 1);
+  const lastSpace = slice.lastIndexOf(' ');
+  const trimmed = (lastSpace > 25 ? slice.slice(0, lastSpace) : slice)
+    .replace(/[,;:\s]+$/, '')
+    .trim();
+  return trimmed.endsWith('.') ? trimmed : `${trimmed}.`;
+}
+
 async function generateSptWithRetry(
   ai: GoogleGenAI,
   cleanBase64: string,
@@ -119,8 +154,9 @@ async function generateSptWithRetry(
             {
               text: `Anda adalah asisten administrasi pemerintahan tingkat Kecamatan di Indonesia.
 Ekstrak seluruh informasi penting dari dokumen PDF Surat Perintah Tugas (SPT) berikut (${fileName || 'SPT.pdf'}) secara akurat dalam bahasa Indonesia formal.
-Jika ada kolom yang tidak tertulis secara eksplisit di PDF, isi dengan string kosong "" (jangan mengarang NIP atau nomor surat).
-Untuk dasarHukum, gabungkan poin-poin dasar hukum dengan format bernomor yang rapi jika ada lebih dari satu.`,
+Jika ada kolom identitas atau nomor yang tidak tertulis secara eksplisit di PDF, isi dengan string kosong "" (jangan mengarang NIP atau nomor surat).
+Untuk dasarHukum, gabungkan poin-poin dasar hukum dengan format bernomor yang rapi jika ada lebih dari satu.
+Selain itu, buatlah draf otomatis untuk kolom hasilPelaksanaan (V. Hasil Pelaksanaan Kegiatan) dan kesimpulanSaran (VI. Kesimpulan dan Saran) yang selaras dengan maksud perjalanan dan tujuan pada SPT dalam bahasa Indonesia dinas yang formal. Masing-masing kolom hasilPelaksanaan dan kesimpulanSaran WAJIB berupa 1 kalimat sangat singkat (maksimal 65–72 karakter, tanpa penomoran dan tanpa baris baru) agar tepat muat dalam paling banyak 1 baris pada kertas A4.`,
             },
           ],
         },
@@ -145,6 +181,16 @@ Untuk dasarHukum, gabungkan poin-poin dasar hukum dengan format bernomor yang ra
               maksudPerjalanan: { type: Type.STRING, description: 'Maksud/keperluan tugas perjalanan dinas' },
               tanggalBerangkat: { type: Type.STRING, description: 'Tanggal mulai/berangkat pelaksanaan tugas' },
               tanggalKembali: { type: Type.STRING, description: 'Tanggal selesai/kembali pelaksanaan tugas' },
+              hasilPelaksanaan: {
+                type: Type.STRING,
+                description:
+                  'Draf otomatis V. Hasil Pelaksanaan Kegiatan dalam bahasa dinas formal berdasarkan tujuan dan maksud perjalanan SPT, paling banyak 1 baris kertas A4 (1 kalimat singkat maksimal 70 karakter).',
+              },
+              kesimpulanSaran: {
+                type: Type.STRING,
+                description:
+                  'Draf otomatis VI. Kesimpulan dan Saran dalam bahasa dinas formal berdasarkan tujuan dan maksud perjalanan SPT, paling banyak 1 baris kertas A4 (1 kalimat singkat maksimal 70 karakter).',
+              },
               tempatLaporan: { type: Type.STRING, description: 'Nama tempat/kota/kecamatan penetapan surat' },
               namaCamat: { type: Type.STRING, description: 'Nama pejabat penandatangan SPT (Camat/Sekcam)' },
               nipCamat: { type: Type.STRING, description: 'NIP pejabat penandatangan SPT' },
@@ -213,7 +259,11 @@ app.post('/api/extract-spt', async (req, res) => {
       .trim()
       .replace(/^```(?:json)?\s*/i, '')
       .replace(/\s*```$/i, '');
-    const parsed = JSON.parse(rawText || '{}');
+    const parsed = JSON.parse(rawText || '{}') as Record<string, unknown>;
+    if (parsed && typeof parsed === 'object') {
+      parsed.hasilPelaksanaan = clampMaxOneA4Line(parsed.hasilPelaksanaan);
+      parsed.kesimpulanSaran = clampMaxOneA4Line(parsed.kesimpulanSaran);
+    }
     res.json({ extracted: parsed });
   } catch (err) {
     console.error('Error extracting SPT PDF:', err);

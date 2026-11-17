@@ -18,6 +18,10 @@ export const SAMPLE_SPT_EXTRACTED: Partial<TravelReportData> = {
     'Melaksanakan Rapat Koordinasi Penyelenggaraan Administrasi Pemerintahan Desa, Monitoring Pelayanan Publik Terpadu, serta Peninjauan Lapangan Progres Pekerjaan Saluran Drainase Jalan Desa Tahun Anggaran 2026.',
   tanggalBerangkat: '14 November 2026',
   tanggalKembali: '14 November 2026',
+  hasilPelaksanaan:
+    'Kegiatan koordinasi dan monitoring di Desa Sukamaju berjalan lancar.',
+  kesimpulanSaran:
+    'Pelaksanaan tugas sesuai rencana dan agar segera ditindaklanjuti.',
   tempatLaporan: 'Cisarua',
   tanggalLaporan: '16 November 2026',
   namaCamat: 'H. Dedi Kurniawan, S.STP., M.Si.',

@@ -141,7 +141,7 @@ export const ReportForm: React.FC<ReportFormProps> = ({
       onApplyExtractedSpt(extracted, file.name);
       setExtractStatus({
         type: 'success',
-        message: `Ekstraksi otomatis dari "${file.name}" berhasil. Kolom dikunci untuk mencegah kesalahan ketik.`,
+        message: `Ekstraksi otomatis dari "${file.name}" berhasil termasuk draf V. Hasil Pelaksanaan Kegiatan & VI. Kesimpulan dan Saran (maks. 1 baris A4). Kolom dikunci otomatis — klik "Ubah Data" untuk menyunting.`,
       });
     } catch (err) {
       const isAbort = err instanceof DOMException && err.name === 'AbortError';
@@ -171,7 +171,7 @@ export const ReportForm: React.FC<ReportFormProps> = ({
       setIsExtracting(false);
       setExtractStatus({
         type: 'success',
-        message: `Simulasi ekstraksi otomatis dari "${demoFile}" selesai. Data dikunci otomatis — klik "Ubah Data" jika ingin menyunting.`,
+        message: `Simulasi ekstraksi otomatis dari "${demoFile}" selesai termasuk draf V. Hasil Pelaksanaan Kegiatan & VI. Kesimpulan dan Saran (maks. 1 baris A4). Klik "Ubah Data" untuk menyunting.`,
       });
     }, 550);
   };
