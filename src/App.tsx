@@ -25,11 +25,11 @@ import {
 import {
   AlertCircle,
   Archive,
+  ArrowLeft,
   BookOpen,
   CheckCircle2,
   CloudUpload,
   FileDown,
-  FilePenLine,
   FileText,
   Info,
   Loader2,
@@ -139,7 +139,7 @@ function mapFirebaseAuthError(err: unknown): string {
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('editor');
+  const [activeTab, setActiveTab] = useState<ActiveTab>('archive');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState<boolean>(false);
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState<boolean>(true);
   const [report, setReport] = useState<TravelReportData>(() => createEmptyReport());
@@ -786,7 +786,7 @@ export default function App() {
       if (auth.currentUser) {
         await signOut(auth);
       }
-      setActiveTab('editor');
+      setActiveTab('archive');
       setLoginError(null);
       setLoginNotice(null);
     } catch (err) {
@@ -1279,6 +1279,16 @@ export default function App() {
     showToast('success', 'Formulir laporan dikosongkan untuk entri baru.');
   };
 
+  const handleStartNewReport = () => {
+    setReport(createEmptyReport());
+    setIsUnlocked(false);
+    setShowRequiredErrors(false);
+    setActiveReportId(null);
+    setActiveReportOriginalStatus(null);
+    setToast(null);
+    setActiveTab('editor');
+  };
+
   const handleSaveToArchive = async () => {
     if (!validateRequiredReportSections()) return;
 
@@ -1519,13 +1529,8 @@ export default function App() {
 
   const navItems: { id: ActiveTab; label: string; icon: React.ReactNode }[] = [
     {
-      id: 'editor',
-      label: 'Editor Laporan',
-      icon: <FilePenLine className="w-4 h-4 shrink-0" />,
-    },
-    {
       id: 'archive',
-      label: 'Arsip Tersimpan',
+      label: 'SPPD',
       icon: <Archive className="w-4 h-4 shrink-0" />,
     },
     {
@@ -1609,7 +1614,7 @@ export default function App() {
           <div className="px-5 h-16 flex items-center gap-3 border-b border-white/10">
             <button
               type="button"
-              onClick={() => handleSelectTab('editor')}
+              onClick={() => handleSelectTab('archive')}
               className="inline-flex items-center gap-2.5 text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0 font-display"
             >
               <img
@@ -1640,7 +1645,8 @@ export default function App() {
           {/* Primary Navigation Links */}
           <nav aria-label="Menu Utama" className="px-3 py-5 space-y-1">
             {navItems.map((item) => {
-              const isActive = activeTab === item.id;
+              const isActive =
+                activeTab === item.id || (item.id === 'archive' && activeTab === 'editor');
               return (
                 <button
                   key={item.id}
@@ -1709,7 +1715,7 @@ export default function App() {
             >
               <button
                 type="button"
-                onClick={() => handleSelectTab('editor')}
+                onClick={() => handleSelectTab('archive')}
                 className="inline-flex items-center gap-2.5 text-base font-bold tracking-tight text-white whitespace-nowrap shrink-0 font-display"
               >
                 <img
@@ -1743,9 +1749,11 @@ export default function App() {
             {desktopSidebarOpen && (
               <span className="hidden lg:inline text-sm font-medium text-slate-200 truncate">
                 {activeTab === 'editor'
-                  ? 'Editor Laporan Perjalanan Dinas'
+                  ? activeReportId
+                    ? 'Sunting Laporan Perjalanan Dinas'
+                    : 'Buat Laporan Baru'
                   : activeTab === 'archive'
-                    ? 'Arsip Tersimpan'
+                    ? 'SPPD'
                     : activeTab === 'staff'
                       ? 'Kelola Akun Staf'
                       : 'Panduan SPT'}
@@ -1813,7 +1821,15 @@ export default function App() {
         {activeTab === 'editor' && (
           <div className="no-print bg-white border-b border-[#D8E0EB]">
             <div className="px-6 py-3 flex flex-wrap items-center justify-between gap-4">
-              <div className="flex items-center gap-2 text-xs text-[#475569]">
+              <div className="flex flex-wrap items-center gap-2.5 text-xs text-[#475569]">
+                <button
+                  type="button"
+                  onClick={() => handleSelectTab('archive')}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-[#0F2A56] bg-[#F8FAFC] border border-[#CBD5E1] rounded-md hover:bg-[#EFF6FF] hover:border-[#BFDBFE] transition-colors whitespace-nowrap shrink-0"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  Kembali ke Arsip
+                </button>
                 <span className="font-semibold text-[#0F172A]">
                   Sistem Laporan Perjalanan Dinas Kecamatan Tarik
                 </span>
@@ -2051,10 +2067,7 @@ export default function App() {
               onLoadReport={handleLoadFromArchive}
               onToggleReportStatus={handleToggleArchiveStatus}
               onDeleteReport={handleDeleteArchive}
-              onCreateNewReport={() => {
-                handleResetReport();
-                setActiveTab('editor');
-              }}
+              onCreateNewReport={handleStartNewReport}
             />
           )}
 

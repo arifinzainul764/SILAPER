@@ -170,7 +170,7 @@ export const ArchivePanel: React.FC<ArchivePanelProps> = ({
                 : 'Tidak ada laporan yang cocok dengan filter pencarian.'}
             </p>
             <p className="text-xs text-[#64748B] mt-1">
-              Susun laporan di Editor Laporan lalu tekan tombol "Simpan ke Arsip".
+              Klik tombol &ldquo;Buat Laporan Baru&rdquo; di atas untuk menyusun laporan lalu tekan &ldquo;Simpan ke Arsip&rdquo;.
             </p>
           </div>
         ) : (
