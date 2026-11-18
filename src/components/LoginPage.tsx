@@ -208,7 +208,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                       htmlFor="login-email"
                       className="block text-xs font-semibold text-[#334155] mb-1"
                     >
-                      NIP atau Email Terdaftar
+                      NIP, Username, atau Email Terdaftar
                     </label>
                     <input
                       id="login-email"
@@ -218,7 +218,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                       required
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
-                      placeholder="Masukkan NIP atau email staf"
+                      placeholder="Masukkan NIP, username, atau email"
                       className="w-full rounded-md border border-[#CBD5E1] bg-white px-3.5 py-2 sm:py-2.5 text-sm text-[#0F172A] placeholder:text-[#94A3B8] focus:border-[#0F2A56] focus:outline-none focus:ring-2 focus:ring-[#0F2A56]/15"
                     />
                   </div>

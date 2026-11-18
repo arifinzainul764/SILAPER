@@ -739,7 +739,7 @@ export async function preparePdfForExtraction(file: File): Promise<PreparedPdfEx
 
     if (hasDigitalText) {
       const kopImageBase64 = page1Canvas
-        ? canvasToCompactJpegBase64(page1Canvas, KOP_CROP_HEIGHT_RATIO, 760, 0.72)
+        ? canvasToCompactJpegBase64(page1Canvas, KOP_CROP_HEIGHT_RATIO, 680, 0.68)
         : '';
       return {
         page1Canvas,
@@ -750,17 +750,17 @@ export async function preparePdfForExtraction(file: File): Promise<PreparedPdfEx
       };
     }
 
-    // Scanned / image-only PDF: send up to 2 compact page JPEGs (~120-160KB each) instead of massive raw PDF
+    // Scanned / image-only PDF: send up to 2 compact page JPEGs for fast multimodal extraction
     const pageImagesBase64: string[] = [];
     if (page1Canvas) {
-      const img1 = canvasToCompactJpegBase64(page1Canvas, 1, 1200, 0.76);
+      const img1 = canvasToCompactJpegBase64(page1Canvas, 1, 1050, 0.7);
       if (img1) pageImagesBase64.push(img1);
     }
     if (pdf.numPages >= 2) {
       const page2 = await pdf.getPage(2);
-      const page2Canvas = await renderPdfPageToCanvas(page2, 1150);
+      const page2Canvas = await renderPdfPageToCanvas(page2, 980);
       if (page2Canvas) {
-        const img2 = canvasToCompactJpegBase64(page2Canvas, 1, 1150, 0.72);
+        const img2 = canvasToCompactJpegBase64(page2Canvas, 1, 960, 0.66);
         if (img2) pageImagesBase64.push(img2);
       }
     }

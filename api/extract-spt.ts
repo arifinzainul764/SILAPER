@@ -11,8 +11,46 @@ type VercelResponse = ServerResponse & {
   json?: (data: unknown) => void;
 };
 
-const PRIMARY_MODEL = 'gemini-4-hydrogen';
-const FALLBACK_MODEL = 'gemini-3.1-flash-lite';
+const PRIMARY_MODEL = 'gemini-3.1-flash-lite';
+const FALLBACK_MODEL = 'gemini-4-hydrogen';
+const OVERALL_DEADLINE_MS = 38000;
+
+function parseModelJsonObject(raw: string | undefined): Record<string, unknown> {
+  const cleaned = (raw ?? '')
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+
+  if (!cleaned) {
+    throw Object.assign(new Error('Model AI mengembalikan respons kosong.'), { status: 502 });
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      try {
+        parsed = JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
+      } catch {
+        throw Object.assign(new Error('Format JSON dari model AI tidak valid.'), { status: 502 });
+      }
+    } else {
+      throw Object.assign(new Error('Format JSON dari model AI tidak valid.'), { status: 502 });
+    }
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw Object.assign(new Error('Data hasil ekstraksi model AI bukan objek JSON yang valid.'), {
+      status: 502,
+    });
+  }
+
+  return parsed as Record<string, unknown>;
+}
 
 function sendJson(res: VercelResponse, statusCode: number, payload: unknown): void {
   res.statusCode = statusCode;
@@ -97,6 +135,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sleepWithJitter(baseMs: number): Promise<void> {
+  const jitter = Math.floor(Math.random() * 450);
+  return sleep(baseMs + jitter);
+}
+
 const MAX_A4_LINE_CHARS = 74;
 
 function clampMaxOneA4Line(rawText: unknown, maxChars = MAX_A4_LINE_CHARS): string {
@@ -151,10 +194,11 @@ async function generateSptWithRetry(
     delayBeforeMs: number;
     timeoutMs: number;
   }[] = [
-    { model: PRIMARY_MODEL, thinkingLevel: ThinkingLevel.LOW, delayBeforeMs: 0, timeoutMs: 38000 },
-    { model: FALLBACK_MODEL, thinkingLevel: ThinkingLevel.MINIMAL, delayBeforeMs: 250, timeoutMs: 32000 },
-    { model: PRIMARY_MODEL, thinkingLevel: ThinkingLevel.LOW, delayBeforeMs: 500, timeoutMs: 32000 },
+    { model: PRIMARY_MODEL, thinkingLevel: ThinkingLevel.MINIMAL, delayBeforeMs: 0, timeoutMs: 18000 },
+    { model: FALLBACK_MODEL, thinkingLevel: ThinkingLevel.LOW, delayBeforeMs: 800, timeoutMs: 20000 },
+    { model: PRIMARY_MODEL, thinkingLevel: ThinkingLevel.MINIMAL, delayBeforeMs: 1400, timeoutMs: 15000 },
   ];
+  const deadlineAt = Date.now() + OVERALL_DEADLINE_MS;
 
   const isDasar = input.documentType === 'dasar';
   const parts: Array<{ inlineData?: { mimeType: string; data: string }; text?: string }> = [];
@@ -302,27 +346,50 @@ Selain itu, buatlah draf otomatis untuk kolom hasilPelaksanaan (V. Hasil Pelaksa
 
   let lastError: unknown;
 
-  for (const step of attemptsPlan) {
-    if (step.delayBeforeMs > 0) {
-      await sleep(step.delayBeforeMs);
+  for (let i = 0; i < attemptsPlan.length; i++) {
+    const step = attemptsPlan[i];
+    const remainingBeforeDelay = deadlineAt - Date.now();
+    if (remainingBeforeDelay < 4000) {
+      break;
     }
 
+    if (step.delayBeforeMs > 0) {
+      await sleepWithJitter(Math.min(step.delayBeforeMs, Math.max(0, remainingBeforeDelay - 4000)));
+    }
+
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs < 3500) {
+      break;
+    }
+
+    const startedAt = Date.now();
     try {
-      return await ai.models.generateContent({
+      const result = await ai.models.generateContent({
         model: step.model,
         contents: { parts },
         config: {
-          abortSignal: AbortSignal.timeout(step.timeoutMs),
+          abortSignal: AbortSignal.timeout(Math.min(step.timeoutMs, remainingMs - 400)),
           thinkingConfig: { thinkingLevel: step.thinkingLevel },
           responseMimeType: 'application/json',
           responseSchema,
         },
       });
+      console.log(`[${isDasar ? 'Dasar' : 'SPT'} Extract] ${step.model} succeeded in ${Date.now() - startedAt}ms`);
+      return result;
     } catch (err) {
       lastError = err;
-      if (!isTransientGeminiError(err)) {
-        throw err;
+      const details = extractErrorDetails(err);
+      const hasNextAttempt =
+        i < attemptsPlan.length - 1 &&
+        isTransientGeminiError(err) &&
+        deadlineAt - Date.now() >= 5500;
+      if (hasNextAttempt) {
+        console.info(
+          `[${isDasar ? 'Dasar' : 'SPT'} Extract] ${step.model} attempt ${i + 1} retrying (${Date.now() - startedAt}ms, status=${details.status ?? 'n/a'}, timeout=${details.isTimeout})`,
+        );
+        continue;
       }
+      throw err;
     }
   }
 
@@ -378,7 +445,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const ai = new GoogleGenAI({
       apiKey,
       httpOptions: {
-        timeout: 45000,
+        timeout: 50000,
         retryOptions: { attempts: 1 },
         headers: {
           'User-Agent': 'aistudio-build',
@@ -394,30 +461,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       pageImagesBase64,
       pdfBase64: cleanBase64,
     });
-    const rawText = (response.text ?? '{}')
-      .trim()
-      .replace(/^```(?:json)?\s*/i, '')
-      .replace(/\s*```$/i, '');
-    const parsed = JSON.parse(rawText || '{}') as Record<string, unknown>;
-    if (parsed && typeof parsed === 'object' && documentType === 'spt') {
+    const parsed = parseModelJsonObject(response.text);
+    if (documentType === 'spt') {
       parsed.hasilPelaksanaan = clampMaxOneA4Line(parsed.hasilPelaksanaan);
       parsed.kesimpulanSaran = clampMaxOneA4Line(parsed.kesimpulanSaran);
     }
 
     sendJson(res, 200, { extracted: parsed });
   } catch (err) {
-    console.error('Vercel /api/extract-spt error:', err);
     const { status, message, isTimeout } = extractErrorDetails(err);
 
     if (isTimeout) {
+      console.warn('Vercel /api/extract-spt timeout:', message);
       sendJson(res, 504, {
         error:
-          'Waktu tunggu ekstraksi AI habis karena server sedang padat. Silakan klik "Coba Lagi" atau gunakan "Simulasi Ekstraksi SPT".',
+          'Waktu tunggu ekstraksi AI habis karena server sedang padat. Silakan klik "Coba Lagi" atau klik "Ubah Data" untuk mengisi manual.',
       });
       return;
     }
 
     if (status === 503 || isTransientGeminiError(err)) {
+      console.warn('Vercel /api/extract-spt transient 503:', message);
       sendJson(res, 503, {
         error:
           'Layanan ekstraksi AI sedang mengalami lonjakan permintaan sementara (503 UNAVAILABLE). Silakan tunggu beberapa detik lalu klik "Coba Lagi".',
@@ -425,6 +489,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       return;
     }
 
+    console.error('Vercel /api/extract-spt error:', err);
     sendJson(res, status && status >= 400 && status < 600 ? status : 500, {
       error: message || 'Gagal mengekstrak dokumen PDF SPT.',
     });

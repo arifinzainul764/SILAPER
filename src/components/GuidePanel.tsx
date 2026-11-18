@@ -31,7 +31,7 @@ export const GuidePanel: React.FC = () => {
               02. Kunci Pengaman & Tombol Ubah Data
             </div>
             <p className="text-xs text-[#475569] leading-relaxed">
-              Secara bawaan seluruh kolom hasil ekstraksi berada pada kondisi non-aktif (Read-Only) agar terhindar dari salah ketik atau terhapus tidak sengaja. Tekan tombol "Ubah Data" untuk membuka kunci bila perlu menyunting manual.
+              Secara bawaan groupbox 04 &amp; 05 disembunyikan agar Live Preview A4 lebih mudah terlihat dan aman dari salah ketik. Tekan tombol &ldquo;Ubah Data&rdquo; untuk menampilkan dan menyunting seluruh kolom secara manual.
             </p>
           </div>
 
@@ -63,7 +63,7 @@ export const GuidePanel: React.FC = () => {
               Kerahasiaan Arsip Berbasis Autentikasi Staf
             </h3>
             <p className="text-xs text-[#475569] mt-1 leading-relaxed">
-              Masuk menggunakan akun resmi (NIP atau Email dan Kata Sandi) yang dibuat oleh Administrator untuk menyimpan laporan ke menu SPPD. Setiap dokumen dilindungi aturan keamanan database sehingga hanya pemilik akun bersangkutan yang dapat membaca, menyunting, atau menghapus laporannya.
+              Masuk menggunakan akun resmi (NIP atau Email dan Kata Sandi) yang dibuat oleh Administrator untuk menyimpan laporan ke menu SPD. Setiap dokumen dilindungi aturan keamanan database sehingga hanya pemilik akun bersangkutan yang dapat membaca, menyunting, atau menghapus laporannya.
             </p>
           </div>
         </div>

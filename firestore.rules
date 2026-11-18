@@ -107,9 +107,13 @@ service cloud.firestore {
           'tanggalBerangkat', 'tanggalKembali', 'hasilPelaksanaan',
           'kesimpulanSaran', 'penutup', 'tempatLaporan', 'tanggalLaporan',
           'namaCamat', 'nipCamat', 'pangkatCamat', 'status', 'photos',
-          'logoDataUrl', 'kopBannerDataUrl', 'createdAt', 'updatedAt'
+          'logoDataUrl', 'kopBannerDataUrl',
+          'sptPdfId', 'sptPdfName', 'sptPdfSize', 'sptPdfDataUrl',
+          'suratDasarPdfId', 'suratDasarPdfName', 'suratDasarPdfSize', 'suratDasarPdfDataUrl',
+          'catatanVerifikasi', 'createdAt', 'updatedAt'
         ])
-        && data.ownerId is string && data.ownerId == request.auth.uid && data.ownerId == userId && isValidId(data.ownerId)
+        && data.ownerId is string && data.ownerId == userId && isValidId(data.ownerId)
+        && (request.auth.uid == data.ownerId || isAdmin())
         && data.namaKabupaten is string && data.namaKabupaten.size() <= 160
         && data.namaKecamatan is string && data.namaKecamatan.size() <= 160
         && data.alamatKecamatan is string && data.alamatKecamatan.size() <= 250
@@ -132,7 +136,7 @@ service cloud.firestore {
         && data.namaCamat is string && data.namaCamat.size() <= 160
         && data.nipCamat is string && data.nipCamat.size() <= 60
         && data.pangkatCamat is string && data.pangkatCamat.size() <= 100
-        && data.status is string && data.status in ['draft', 'final']
+        && data.status is string && data.status in ['diajukan', 'diterima', 'ditolak']
         && data.photos is list && data.photos.size() <= 4
         && (data.photos.size() == 0 || isValidPhotoItem(data.photos[0]))
         && (data.photos.size() <= 1 || isValidPhotoItem(data.photos[1]))
@@ -140,6 +144,15 @@ service cloud.firestore {
         && (data.photos.size() <= 3 || isValidPhotoItem(data.photos[3]))
         && (!data.keys().hasAny(['logoDataUrl']) || (data.logoDataUrl is string && data.logoDataUrl.size() <= 220000))
         && (!data.keys().hasAny(['kopBannerDataUrl']) || (data.kopBannerDataUrl is string && data.kopBannerDataUrl.size() <= 220000))
+        && (!data.keys().hasAny(['sptPdfId']) || (data.sptPdfId is string && data.sptPdfId.size() <= 80 && data.sptPdfId.matches('^[a-zA-Z0-9_\\-]*$')))
+        && (!data.keys().hasAny(['sptPdfName']) || (data.sptPdfName is string && data.sptPdfName.size() <= 200))
+        && (!data.keys().hasAny(['sptPdfSize']) || (data.sptPdfSize is number && data.sptPdfSize >= 0 && data.sptPdfSize <= 12582912))
+        && (!data.keys().hasAny(['sptPdfDataUrl']) || (data.sptPdfDataUrl is string && data.sptPdfDataUrl.size() <= 180000))
+        && (!data.keys().hasAny(['suratDasarPdfId']) || (data.suratDasarPdfId is string && data.suratDasarPdfId.size() <= 80 && data.suratDasarPdfId.matches('^[a-zA-Z0-9_\\-]*$')))
+        && (!data.keys().hasAny(['suratDasarPdfName']) || (data.suratDasarPdfName is string && data.suratDasarPdfName.size() <= 200))
+        && (!data.keys().hasAny(['suratDasarPdfSize']) || (data.suratDasarPdfSize is number && data.suratDasarPdfSize >= 0 && data.suratDasarPdfSize <= 12582912))
+        && (!data.keys().hasAny(['suratDasarPdfDataUrl']) || (data.suratDasarPdfDataUrl is string && data.suratDasarPdfDataUrl.size() <= 200000))
+        && (!data.keys().hasAny(['catatanVerifikasi']) || (data.catatanVerifikasi is string && data.catatanVerifikasi.size() <= 500))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -188,8 +201,9 @@ service cloud.firestore {
       allow delete: if false;
 
       match /reports/{reportId} {
-        allow get: if isValidId(userId) && isValidId(reportId) && isOwner(userId);
-        allow list: if isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow get: if isValidId(userId) && isValidId(reportId) && (isOwner(userId) || isAdmin());
+        allow list: if (isOwner(userId) && resource.data.ownerId == request.auth.uid)
+          || (isAdmin() && resource.data.ownerId != '');
         allow create: if isValidId(userId)
           && isValidId(reportId)
           && isOwner(userId)
@@ -199,29 +213,37 @@ service cloud.firestore {
           && exists(/databases/$(database)/documents/users/$(userId));
         allow update: if isValidId(userId)
           && isValidId(reportId)
-          && isOwner(userId)
+          && (isOwner(userId) || isAdmin())
           && isValidTravelReport(incoming(), userId)
           && incoming().ownerId == existing().ownerId
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
           && exists(/databases/$(database)/documents/users/$(userId))
           && (
-            (existing().status == 'draft' && incoming().diff(existing()).affectedKeys().hasOnly([
+            isAdmin()
+            || ((existing().status in ['diajukan', 'ditolak', 'draft']) && incoming().diff(existing()).affectedKeys().hasOnly([
               'namaKabupaten', 'namaKecamatan', 'alamatKecamatan',
               'nomorSpt', 'tanggalSpt', 'dasarHukum', 'namaPegawai', 'nip',
               'pangkatGolongan', 'jabatan', 'tujuan', 'maksudPerjalanan',
               'tanggalBerangkat', 'tanggalKembali', 'hasilPelaksanaan',
               'kesimpulanSaran', 'penutup', 'tempatLaporan', 'tanggalLaporan',
               'namaCamat', 'nipCamat', 'pangkatCamat', 'status', 'photos',
-              'logoDataUrl', 'kopBannerDataUrl', 'updatedAt'
+              'logoDataUrl', 'kopBannerDataUrl',
+              'sptPdfId', 'sptPdfName', 'sptPdfSize', 'sptPdfDataUrl',
+              'suratDasarPdfId', 'suratDasarPdfName', 'suratDasarPdfSize', 'suratDasarPdfDataUrl',
+              'catatanVerifikasi', 'updatedAt'
             ]))
-            || (existing().status == 'final' && incoming().status == 'draft' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+            || (existing().status in ['diterima', 'final'] && incoming().status in ['diajukan', 'ditolak'] && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
           );
         allow delete: if isValidId(userId)
           && isValidId(reportId)
-          && isOwner(userId)
-          && existing().ownerId == request.auth.uid;
+          && (isOwner(userId) || isAdmin())
+          && existing().ownerId == userId;
       }
+    }
+
+    match /{path=**}/reports/{reportId} {
+      allow list: if isAdmin() && resource.data.ownerId != '';
     }
   }
 }

@@ -55,7 +55,7 @@ export const SAMPLE_FULL_REPORT: TravelReportData = {
   namaCamat: SAMPLE_SPT_EXTRACTED.namaCamat!,
   nipCamat: SAMPLE_SPT_EXTRACTED.nipCamat!,
   pangkatCamat: SAMPLE_SPT_EXTRACTED.pangkatCamat!,
-  status: 'draft',
+  status: 'diajukan',
   photos: [
     {
       id: 'sample-foto-1',

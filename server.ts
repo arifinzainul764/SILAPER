@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
+dotenv.config({ path: '.env.local' });
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
@@ -15,13 +16,51 @@ const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: '18mb' }));
 
-app.get('/api/health', (_req, res) => {
+app.get(['/api/health', '/api/health/'], (_req, res) => {
   res.json({ ok: true });
 });
 
-const PRIMARY_MODEL = 'gemini-4-hydrogen';
-const FALLBACK_MODEL = 'gemini-3.1-flash-lite';
-const ATTEMPT_TIMEOUT_MS = 45000;
+const PRIMARY_MODEL = 'gemini-3.1-flash-lite';
+const FALLBACK_MODEL = 'gemini-4-hydrogen';
+const ATTEMPT_TIMEOUT_MS = 48000;
+const OVERALL_DEADLINE_MS = 46000;
+
+function parseModelJsonObject(raw: string | undefined): Record<string, unknown> {
+  const cleaned = (raw ?? '')
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+
+  if (!cleaned) {
+    throw Object.assign(new Error('Model AI mengembalikan respons kosong.'), { status: 502 });
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      try {
+        parsed = JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
+      } catch {
+        throw Object.assign(new Error('Format JSON dari model AI tidak valid.'), { status: 502 });
+      }
+    } else {
+      throw Object.assign(new Error('Format JSON dari model AI tidak valid.'), { status: 502 });
+    }
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw Object.assign(new Error('Data hasil ekstraksi model AI bukan objek JSON yang valid.'), {
+      status: 502,
+    });
+  }
+
+  return parsed as Record<string, unknown>;
+}
 
 function extractErrorDetails(err: unknown): { status?: number; message: string; isTimeout: boolean } {
   if (!err || typeof err !== 'object') {
@@ -86,6 +125,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sleepWithJitter(baseMs: number): Promise<void> {
+  const jitter = Math.floor(Math.random() * 450);
+  return sleep(baseMs + jitter);
+}
+
 const MAX_A4_LINE_CHARS = 74;
 
 function clampMaxOneA4Line(rawText: unknown, maxChars = MAX_A4_LINE_CHARS): string {
@@ -135,10 +179,11 @@ async function generateSptWithRetry(
   input: SptExtractionPayload,
 ) {
   const attemptsPlan: { model: string; thinkingLevel: ThinkingLevel; delayBeforeMs: number; timeoutMs: number }[] = [
-    { model: PRIMARY_MODEL, thinkingLevel: ThinkingLevel.LOW, delayBeforeMs: 0, timeoutMs: 38000 },
-    { model: FALLBACK_MODEL, thinkingLevel: ThinkingLevel.MINIMAL, delayBeforeMs: 250, timeoutMs: 32000 },
-    { model: PRIMARY_MODEL, thinkingLevel: ThinkingLevel.LOW, delayBeforeMs: 500, timeoutMs: 32000 },
+    { model: PRIMARY_MODEL, thinkingLevel: ThinkingLevel.MINIMAL, delayBeforeMs: 0, timeoutMs: 20000 },
+    { model: FALLBACK_MODEL, thinkingLevel: ThinkingLevel.LOW, delayBeforeMs: 900, timeoutMs: 24000 },
+    { model: PRIMARY_MODEL, thinkingLevel: ThinkingLevel.MINIMAL, delayBeforeMs: 1600, timeoutMs: 18000 },
   ];
+  const deadlineAt = Date.now() + OVERALL_DEADLINE_MS;
 
   const isDasar = input.documentType === 'dasar';
   const parts: Array<{ inlineData?: { mimeType: string; data: string }; text?: string }> = [];
@@ -288,8 +333,18 @@ Selain itu, buatlah draf otomatis untuk kolom hasilPelaksanaan (V. Hasil Pelaksa
 
   for (let i = 0; i < attemptsPlan.length; i++) {
     const step = attemptsPlan[i];
+    const remainingBeforeDelay = deadlineAt - Date.now();
+    if (remainingBeforeDelay < 4000) {
+      break;
+    }
+
     if (step.delayBeforeMs > 0) {
-      await sleep(step.delayBeforeMs);
+      await sleepWithJitter(Math.min(step.delayBeforeMs, Math.max(0, remainingBeforeDelay - 4000)));
+    }
+
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs < 3500) {
+      break;
     }
 
     const startedAt = Date.now();
@@ -298,7 +353,7 @@ Selain itu, buatlah draf otomatis untuk kolom hasilPelaksanaan (V. Hasil Pelaksa
         model: step.model,
         contents: { parts },
         config: {
-          abortSignal: AbortSignal.timeout(step.timeoutMs),
+          abortSignal: AbortSignal.timeout(Math.min(step.timeoutMs, remainingMs - 400)),
           thinkingConfig: { thinkingLevel: step.thinkingLevel },
           responseMimeType: 'application/json',
           responseSchema,
@@ -309,21 +364,27 @@ Selain itu, buatlah draf otomatis untuk kolom hasilPelaksanaan (V. Hasil Pelaksa
     } catch (err) {
       lastError = err;
       const details = extractErrorDetails(err);
-      console.warn(
-        `[${isDasar ? 'Dasar' : 'SPT'} Extract] ${step.model} failed in ${Date.now() - startedAt}ms (status=${details.status ?? 'n/a'}, timeout=${details.isTimeout}): ${details.message.slice(0, 180)}`,
-      );
-      if (!isTransientGeminiError(err)) {
-        throw err;
+      const hasNextAttempt =
+        i < attemptsPlan.length - 1 &&
+        isTransientGeminiError(err) &&
+        deadlineAt - Date.now() >= 5500;
+      if (hasNextAttempt) {
+        console.info(
+          `[${isDasar ? 'Dasar' : 'SPT'} Extract] ${step.model} attempt ${i + 1} retrying (${Date.now() - startedAt}ms, status=${details.status ?? 'n/a'}, timeout=${details.isTimeout})`,
+        );
+        continue;
       }
+      throw err;
     }
   }
 
   throw lastError;
 }
 
-app.post('/api/extract-spt', async (req, res) => {
+app.post(['/api/extract-spt', '/api/extract-spt/'], async (req, res) => {
+  let resolvedType: 'spt' | 'dasar' = 'spt';
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
     if (!apiKey) {
       res.status(503).json({
         error: 'Layanan ekstraksi AI belum dikonfigurasi (GEMINI_API_KEY tidak tersedia pada server).',
@@ -347,7 +408,7 @@ app.post('/api/extract-spt', async (req, res) => {
       fileName?: string;
     };
 
-    const resolvedType: 'spt' | 'dasar' = documentType === 'dasar' ? 'dasar' : 'spt';
+    resolvedType = documentType === 'dasar' ? 'dasar' : 'spt';
 
     const cleanBase64 =
       typeof pdfBase64 === 'string'
@@ -383,29 +444,26 @@ app.post('/api/extract-spt', async (req, res) => {
       pdfBase64: cleanBase64,
     });
 
-    const rawText = (response.text ?? '{}')
-      .trim()
-      .replace(/^```(?:json)?\s*/i, '')
-      .replace(/\s*```$/i, '');
-    const parsed = JSON.parse(rawText || '{}') as Record<string, unknown>;
-    if (parsed && typeof parsed === 'object' && resolvedType === 'spt') {
+    const parsed = parseModelJsonObject(response.text);
+    if (resolvedType === 'spt') {
       parsed.hasilPelaksanaan = clampMaxOneA4Line(parsed.hasilPelaksanaan);
       parsed.kesimpulanSaran = clampMaxOneA4Line(parsed.kesimpulanSaran);
     }
     res.json({ extracted: parsed });
   } catch (err) {
-    console.error('Error extracting SPT PDF:', err);
     const { status, message, isTimeout } = extractErrorDetails(err);
 
     if (isTimeout) {
+      console.warn(`[${resolvedType.toUpperCase()} Extract] Upstream request timed out: ${message}`);
       res.status(504).json({
         error:
-          'Waktu tunggu ekstraksi AI habis karena server sedang padat. Silakan klik "Coba Lagi" atau gunakan "Simulasi Ekstraksi SPT".',
+          'Waktu tunggu ekstraksi AI habis karena server sedang padat. Silakan klik "Coba Lagi" atau klik "Ubah Data" untuk mengisi manual.',
       });
       return;
     }
 
     if (status === 503 || isTransientGeminiError(err)) {
+      console.warn(`[${resolvedType.toUpperCase()} Extract] Transient Gemini unavailability (status=${status ?? 'n/a'}): ${message}`);
       res.status(503).json({
         error:
           'Layanan ekstraksi AI sedang mengalami lonjakan permintaan sementara (503 UNAVAILABLE). Silakan tunggu beberapa detik lalu klik "Coba Lagi".',
@@ -413,11 +471,41 @@ app.post('/api/extract-spt', async (req, res) => {
       return;
     }
 
+    console.error('Error extracting SPT PDF:', err);
     res.status(status && status >= 400 && status < 600 ? status : 500).json({
       error: message || 'Gagal mengekstrak dokumen PDF SPT.',
     });
   }
 });
+
+app.all('/api/*', (_req, res) => {
+  res.status(404).json({ error: 'Endpoint API tidak ditemukan.' });
+});
+
+app.use(
+  (
+    err: unknown,
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction,
+  ) => {
+    if (!req.path.startsWith('/api/')) {
+      next(err);
+      return;
+    }
+    const status =
+      err && typeof err === 'object' && 'status' in err && typeof (err as { status?: unknown }).status === 'number'
+        ? ((err as { status: number }).status)
+        : 500;
+    const message =
+      status === 413
+        ? 'Ukuran payload PDF melebihi batas server (maks. 18 MB).'
+        : err instanceof Error
+          ? err.message
+          : 'Terjadi kesalahan pada permintaan API.';
+    res.status(status).json({ error: message });
+  },
+);
 
 async function startServer() {
   const httpServer = http.createServer(app);

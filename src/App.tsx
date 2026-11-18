@@ -10,6 +10,7 @@ import {
 } from 'firebase/auth';
 import {
   collection,
+  collectionGroup,
   deleteDoc,
   doc,
   getDoc,
@@ -27,31 +28,36 @@ import {
   ArrowLeft,
   BookOpen,
   CheckCircle2,
-  CloudUpload,
+  ChevronDown,
+  ChevronUp,
   FileDown,
   FileText,
   Home,
-  Info,
   Loader2,
   LogOut,
   Menu,
   Printer,
   RotateCcw,
+  Send,
   UserCheck,
   UserPen,
   UserRound,
-  Zap,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
 import { A4Preview } from './components/A4Preview';
+import { AccountPanel } from './components/AccountPanel';
 import { ArchivePanel } from './components/ArchivePanel';
 import { GuidePanel } from './components/GuidePanel';
 import { HomePanel } from './components/HomePanel';
 import { LoginPage } from './components/LoginPage';
-import { ExtractedSuratDasar, ReportForm } from './components/ReportForm';
+import {
+  ReportForm,
+  SptAttachmentPayload,
+  SuratDasarAttachmentPayload,
+} from './components/ReportForm';
 import { EditStaffInput, StaffAdminPanel } from './components/StaffAdminPanel';
-import { appendDasarToText, cleanSingleDasarEntry, removeDasarFromText } from './lib/dasarUtils';
+import { deleteSuratDasarPdf } from './lib/suratDasarStorage';
 import { exportReportToDocx } from './lib/exportDocx';
 import { exportReportToPdf } from './lib/exportPdf';
 import {
@@ -60,7 +66,6 @@ import {
   db,
   handleFirestoreError,
 } from './lib/firebase';
-import { SAMPLE_FULL_REPORT } from './lib/sampleData';
 import {
   generateSaltHex,
   hashStaffPassword,
@@ -74,17 +79,26 @@ import {
 import {
   ADMIN_EMAIL,
   AuthorizedStaff,
+  ReportStatus,
   STAFF_FIELD_LIMITS,
   StoredTravelReport,
   TravelReportData,
   createEmptyReport,
+  normalizeReportStatus,
   sanitizeReportForFirestore,
 } from './types/report';
 
-type ActiveTab = 'home' | 'editor' | 'archive' | 'guide' | 'staff';
+type ActiveTab = 'home' | 'editor' | 'archive' | 'guide' | 'staff' | 'account';
 
 const TEMP_ADMIN_STORAGE_KEY = 'silaper_temp_admin';
+const TEMP_OPERATOR_STORAGE_KEY = 'silaper_temp_operator';
 const LOCAL_REPORTS_STORAGE_KEY = 'silaper_local_reports';
+const OPERATOR_OVERRIDES_STORAGE_KEY = 'silaper_operator_fb_overrides';
+
+interface OperatorStatusOverride {
+  status: ReportStatus;
+  catatanVerifikasi?: string;
+}
 
 function getReportStorageKey(staffNipKey?: string): string {
   return staffNipKey ? `silaper_local_reports_${staffNipKey}` : LOCAL_REPORTS_STORAGE_KEY;
@@ -95,10 +109,20 @@ function readLocalReports(staffNipKey?: string): StoredTravelReport[] {
     const raw = localStorage.getItem(getReportStorageKey(staffNipKey));
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as StoredTravelReport[]) : [];
+    if (!Array.isArray(parsed)) return [];
+    return (parsed as StoredTravelReport[]).map((item) => ({
+      ...item,
+      status: normalizeReportStatus(item.status),
+    }));
   } catch {
     return [];
   }
+}
+
+function readScopedUserReports(staffNipKey: string): StoredTravelReport[] {
+  return readLocalReports(staffNipKey).filter(
+    (item) => !item.ownerId || item.ownerId === staffNipKey,
+  );
 }
 
 function writeLocalReports(reports: StoredTravelReport[], staffNipKey?: string) {
@@ -107,6 +131,134 @@ function writeLocalReports(reports: StoredTravelReport[], staffNipKey?: string) 
   } catch {
     // Ignore storage quota errors
   }
+}
+
+function readOperatorOverrides(): Record<string, OperatorStatusOverride> {
+  try {
+    const raw = localStorage.getItem(OPERATOR_OVERRIDES_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object'
+      ? (parsed as Record<string, OperatorStatusOverride>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeOperatorOverrides(map: Record<string, OperatorStatusOverride>) {
+  try {
+    localStorage.setItem(OPERATOR_OVERRIDES_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+function getAllLocalReportKeys(): string[] {
+  const keys: string[] = [];
+  try {
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (
+        key &&
+        (key === LOCAL_REPORTS_STORAGE_KEY || key.startsWith('silaper_local_reports_'))
+      ) {
+        keys.push(key);
+      }
+    }
+  } catch {
+    // Ignore storage errors
+  }
+  return keys;
+}
+
+function readAllLocalReports(): StoredTravelReport[] {
+  const byId = new Map<string, StoredTravelReport>();
+  const overrides = readOperatorOverrides();
+
+  for (const key of getAllLocalReportKeys()) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) continue;
+      for (const item of parsed as StoredTravelReport[]) {
+        if (!item?.id) continue;
+        const override = overrides[item.id];
+        byId.set(item.id, {
+          ...item,
+          status: normalizeReportStatus(override ? override.status : item.status),
+          catatanVerifikasi:
+            override && override.catatanVerifikasi !== undefined
+              ? override.catatanVerifikasi
+              : item.catatanVerifikasi || '',
+        });
+      }
+    } catch {
+      // Ignore malformed bucket
+    }
+  }
+
+  return Array.from(byId.values());
+}
+
+function updateReportInLocalBuckets(
+  reportId: string,
+  updater: (item: StoredTravelReport) => StoredTravelReport,
+): boolean {
+  let updated = false;
+
+  for (const key of getAllLocalReportKeys()) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) continue;
+      const list = parsed as StoredTravelReport[];
+      if (!list.some((item) => item.id === reportId)) continue;
+
+      const nextList = list.map((item) => {
+        if (item.id !== reportId) return item;
+        updated = true;
+        const nextItem = updater(item);
+        if (key.startsWith('silaper_local_reports_fb_')) {
+          const overrides = readOperatorOverrides();
+          overrides[reportId] = {
+            status: normalizeReportStatus(nextItem.status),
+            catatanVerifikasi: nextItem.catatanVerifikasi || '',
+          };
+          writeOperatorOverrides(overrides);
+        }
+        return nextItem;
+      });
+      localStorage.setItem(key, JSON.stringify(nextList));
+    } catch {
+      // Ignore malformed bucket
+    }
+  }
+
+  return updated;
+}
+
+function deleteReportFromLocalBuckets(reportId: string): boolean {
+  let deleted = false;
+  for (const key of getAllLocalReportKeys()) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) continue;
+      const list = parsed as StoredTravelReport[];
+      const nextList = list.filter((item) => item.id !== reportId);
+      if (nextList.length !== list.length) {
+        deleted = true;
+        localStorage.setItem(key, JSON.stringify(nextList));
+      }
+    } catch {
+      // Ignore malformed bucket
+    }
+  }
+  return deleted;
 }
 
 function mapFirebaseAuthError(err: unknown): string {
@@ -139,6 +291,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('home');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState<boolean>(false);
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState<boolean>(true);
+  const [mobileToolbarExpanded, setMobileToolbarExpanded] = useState<boolean>(false);
   const [report, setReport] = useState<TravelReportData>(() => createEmptyReport());
   const [isUnlocked, setIsUnlocked] = useState<boolean>(false);
 
@@ -151,10 +304,19 @@ export default function App() {
       return false;
     }
   });
+  const [isOperator, setIsOperator] = useState<boolean>(() => {
+    try {
+      return (
+        typeof window !== 'undefined' && sessionStorage.getItem(TEMP_OPERATOR_STORAGE_KEY) === '1'
+      );
+    } catch {
+      return false;
+    }
+  });
   const [localStaff, setLocalStaff] = useState<AuthorizedStaff | null>(() =>
     typeof window !== 'undefined' ? readActiveStaffSession() : null,
   );
-  const hasLocalSession = isTempAdmin || Boolean(localStaff);
+  const hasLocalSession = isTempAdmin || isOperator || Boolean(localStaff);
   const [authReady, setAuthReady] = useState<boolean>(false);
   const [isCheckingAccess, setIsCheckingAccess] = useState<boolean>(false);
   const [accessGranted, setAccessGranted] = useState<boolean>(() => {
@@ -162,6 +324,7 @@ export default function App() {
       return (
         typeof window !== 'undefined' &&
         (sessionStorage.getItem(TEMP_ADMIN_STORAGE_KEY) === '1' ||
+          sessionStorage.getItem(TEMP_OPERATOR_STORAGE_KEY) === '1' ||
           Boolean(readActiveStaffSession()))
       );
     } catch {
@@ -176,7 +339,7 @@ export default function App() {
   const [savedReports, setSavedReports] = useState<StoredTravelReport[]>([]);
   const [loadingReports, setLoadingReports] = useState<boolean>(false);
   const [activeReportId, setActiveReportId] = useState<string | null>(null);
-  const [activeReportOriginalStatus, setActiveReportOriginalStatus] = useState<'draft' | 'final' | null>(null);
+  const [activeReportOriginalStatus, setActiveReportOriginalStatus] = useState<ReportStatus | null>(null);
   const [staffList, setStaffList] = useState<AuthorizedStaff[]>([]);
   const [loadingStaff, setLoadingStaff] = useState<boolean>(false);
 
@@ -188,30 +351,56 @@ export default function App() {
   const [validationModalOpen, setValidationModalOpen] = useState<boolean>(false);
   const [validationMessages, setValidationMessages] = useState<string[]>([]);
   const [showRequiredErrors, setShowRequiredErrors] = useState<boolean>(false);
-  const [uploadedDasarCitation, setUploadedDasarCitation] = useState<string>('');
   const [formSessionKey, setFormSessionKey] = useState<number>(0);
 
   // User Profile & Menubar Pop-up Menu states
   const [profileName, setProfileName] = useState<string>('Staf Kecamatan');
   const [profileInstansi, setProfileInstansi] = useState<string>('Pemerintah Kecamatan');
   const [profileMenuOpen, setProfileMenuOpen] = useState<boolean>(false);
-  const [editProfileOpen, setEditProfileOpen] = useState<boolean>(false);
-  const [draftProfileName, setDraftProfileName] = useState<string>('');
-  const [draftProfileInstansi, setDraftProfileInstansi] = useState<string>('');
-  const [isSavingProfile, setIsSavingProfile] = useState<boolean>(false);
   const profileMenuRef = useRef<HTMLDivElement>(null);
 
-  // Live Preview Zoom states (50% - 175%)
+  // Live Preview Zoom states (35% - 175%) with automatic fit-to-width on wide/responsive screens
   const [previewZoom, setPreviewZoom] = useState<number>(1);
+  const [isAutoFitZoom, setIsAutoFitZoom] = useState<boolean>(true);
   const [previewSize, setPreviewSize] = useState<{ width: number; height: number }>({
     width: 0,
     height: 0,
   });
   const previewWrapperRef = useRef<HTMLDivElement>(null);
   const previewContentRef = useRef<HTMLDivElement>(null);
+  const actionToolbarRef = useRef<HTMLDivElement>(null);
+  const [actionToolbarHeight, setActionToolbarHeight] = useState<number>(60);
+
+  useEffect(() => {
+    const toolbarEl = actionToolbarRef.current;
+    if (!toolbarEl || activeTab !== 'editor') return;
+
+    const updateToolbarHeight = () => {
+      setActionToolbarHeight(toolbarEl.offsetHeight || 60);
+    };
+
+    updateToolbarHeight();
+    const observer = new ResizeObserver(updateToolbarHeight);
+    observer.observe(toolbarEl);
+    return () => observer.disconnect();
+  }, [activeTab, accessGranted, hasLocalSession, desktopSidebarOpen, activeReportId]);
+
+  const computeAutoFitZoom = useCallback(() => {
+    const wrapper = previewWrapperRef.current;
+    const content = previewContentRef.current;
+    if (!wrapper || !content || content.offsetWidth === 0) return;
+    const wrapperStyle = window.getComputedStyle(wrapper);
+    const padX =
+      (parseFloat(wrapperStyle.paddingLeft) || 0) +
+      (parseFloat(wrapperStyle.paddingRight) || 0);
+    const availableWidth = Math.max(240, wrapper.clientWidth - padX - 8);
+    const fitted = Math.min(1.2, Math.max(0.35, availableWidth / content.offsetWidth));
+    setPreviewZoom(Math.round(fitted * 100) / 100);
+  }, []);
 
   useEffect(() => {
     const el = previewContentRef.current;
+    const wrapper = previewWrapperRef.current;
     if (!el || activeTab !== 'editor') return;
 
     const updateSize = () => {
@@ -219,33 +408,47 @@ export default function App() {
         width: el.offsetWidth,
         height: el.offsetHeight,
       });
+      if (isAutoFitZoom) {
+        computeAutoFitZoom();
+      }
     };
 
     updateSize();
     const observer = new ResizeObserver(updateSize);
     observer.observe(el);
+    if (wrapper) {
+      observer.observe(wrapper);
+    }
     return () => observer.disconnect();
-  }, [activeTab, accessGranted, hasLocalSession, report.photos.length, report.dasarHukum]);
+  }, [
+    activeTab,
+    accessGranted,
+    hasLocalSession,
+    isAutoFitZoom,
+    desktopSidebarOpen,
+    computeAutoFitZoom,
+    report.photos.length,
+    report.dasarHukum,
+  ]);
 
   const handleZoomOut = () => {
-    setPreviewZoom((prev) => Math.max(0.5, Math.round((prev - 0.1) * 100) / 100));
+    setIsAutoFitZoom(false);
+    setPreviewZoom((prev) => Math.max(0.35, Math.round((prev - 0.1) * 100) / 100));
   };
 
   const handleZoomIn = () => {
+    setIsAutoFitZoom(false);
     setPreviewZoom((prev) => Math.min(1.75, Math.round((prev + 0.1) * 100) / 100));
   };
 
   const handleResetZoom = () => {
+    setIsAutoFitZoom(false);
     setPreviewZoom(1);
   };
 
   const handleFitPreviewWidth = () => {
-    const wrapper = previewWrapperRef.current;
-    const content = previewContentRef.current;
-    if (!wrapper || !content || content.offsetWidth === 0) return;
-    const availableWidth = Math.max(280, wrapper.clientWidth - 48);
-    const fitted = Math.min(1.5, Math.max(0.5, availableWidth / content.offsetWidth));
-    setPreviewZoom(Math.round(fitted * 100) / 100);
+    setIsAutoFitZoom(true);
+    computeAutoFitZoom();
   };
 
   useEffect(() => {
@@ -335,6 +538,34 @@ export default function App() {
     (Boolean(user?.email) &&
       user?.email?.trim().toLowerCase() === ADMIN_EMAIL &&
       user?.emailVerified === true);
+
+  const canManageStaff = isAdminUser || isOperator;
+  const canVerifyReports = isAdminUser || isOperator;
+  const isRegularUser = !isAdminUser && !isOperator && (Boolean(localStaff) || Boolean(user));
+  const currentOwnerId = localStaff
+    ? localStaff.nipKey
+    : user
+      ? user.uid
+      : isOperator
+        ? 'operator'
+        : isTempAdmin
+          ? 'temp-admin'
+          : '';
+  const accountRoleLabel: 'User' | 'Operator' | 'Administrator' = isAdminUser
+    ? 'Administrator'
+    : isOperator
+      ? 'Operator'
+      : 'User';
+
+  const resetEditorWorkspace = useCallback(() => {
+    setReport(createEmptyReport());
+    setActiveReportId(null);
+    setActiveReportOriginalStatus(null);
+    setIsUnlocked(false);
+    setShowRequiredErrors(false);
+    setValidationModalOpen(false);
+    setFormSessionKey((prev) => prev + 1);
+  }, []);
 
   const verifyAccessAndSyncProfile = useCallback(async (currentUser: User): Promise<boolean> => {
     setIsCheckingAccess(true);
@@ -452,10 +683,28 @@ export default function App() {
       setUser(currentUser);
 
       if (!currentUser) {
+        const hasTempOperator =
+          typeof window !== 'undefined' &&
+          sessionStorage.getItem(TEMP_OPERATOR_STORAGE_KEY) === '1';
+        if (hasTempOperator) {
+          setIsOperator(true);
+          setIsTempAdmin(false);
+          setLocalStaff(null);
+          setAccessGranted(true);
+          setNeedsEmailVerification(false);
+          setIsCheckingAccess(false);
+          setAuthReady(true);
+          setProfileName('Operator SILAPER');
+          setProfileInstansi('Pemerintah Kecamatan Tarik');
+          setSavedReports(readAllLocalReports());
+          return;
+        }
+
         const hasTempAdmin =
           typeof window !== 'undefined' &&
           sessionStorage.getItem(TEMP_ADMIN_STORAGE_KEY) === '1';
         if (hasTempAdmin) {
+          setIsOperator(false);
           setIsTempAdmin(true);
           setLocalStaff(null);
           setAccessGranted(true);
@@ -464,12 +713,13 @@ export default function App() {
           setAuthReady(true);
           setProfileName('Administrator SILAPER');
           setProfileInstansi('Pemerintah Kecamatan Tarik');
-          setSavedReports(readLocalReports());
+          setSavedReports(readAllLocalReports());
           return;
         }
 
         const savedStaffSession = readActiveStaffSession();
         if (savedStaffSession) {
+          setIsOperator(false);
           setIsTempAdmin(false);
           setLocalStaff(savedStaffSession);
           setAccessGranted(true);
@@ -478,10 +728,11 @@ export default function App() {
           setAuthReady(true);
           setProfileName(savedStaffSession.displayName);
           setProfileInstansi(savedStaffSession.jabatan || 'Pemerintah Kecamatan Tarik');
-          setSavedReports(readLocalReports(savedStaffSession.nipKey));
+          setSavedReports(readScopedUserReports(savedStaffSession.nipKey));
           return;
         }
 
+        setIsOperator(false);
         setIsTempAdmin(false);
         setLocalStaff(null);
         setAccessGranted(false);
@@ -490,8 +741,7 @@ export default function App() {
         setAuthReady(true);
         setSavedReports([]);
         setStaffList([]);
-        setActiveReportId(null);
-        setActiveReportOriginalStatus(null);
+        resetEditorWorkspace();
         setProfileName('Staf Kecamatan');
         setProfileInstansi('Pemerintah Kecamatan Tarik');
         return;
@@ -499,47 +749,78 @@ export default function App() {
 
       if (typeof window !== 'undefined') {
         sessionStorage.removeItem(TEMP_ADMIN_STORAGE_KEY);
+        sessionStorage.removeItem(TEMP_OPERATOR_STORAGE_KEY);
       }
       writeActiveStaffSession(null);
+      setIsOperator(false);
       setIsTempAdmin(false);
       setLocalStaff(null);
       await verifyAccessAndSyncProfile(currentUser);
     });
 
     return () => unsubscribe();
-  }, [verifyAccessAndSyncProfile]);
+  }, [verifyAccessAndSyncProfile, resetEditorWorkspace]);
 
   // Attach real-time Firestore listener ONLY when authReady && user && accessGranted
   useEffect(() => {
     if (!authReady || !user || !accessGranted || hasLocalSession) return;
 
     setLoadingReports(true);
-    const reportsPath = `users/${user.uid}/reports`;
-    const q = query(
-      collection(db, 'users', user.uid, 'reports'),
-      where('ownerId', '==', user.uid),
-    );
+    const reportsPath = isAdminUser ? 'reports' : `users/${user.uid}/reports`;
+    const q = isAdminUser
+      ? query(collectionGroup(db, 'reports'), where('ownerId', '!=', ''))
+      : query(collection(db, 'users', user.uid, 'reports'), where('ownerId', '==', user.uid));
 
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
+        const overrides = readOperatorOverrides();
+        let overridesDirty = false;
+
         const items: StoredTravelReport[] = snapshot.docs.map((docSnap) => {
           const data = docSnap.data() as TravelReportData & {
             ownerId: string;
             createdAt?: { toMillis?: () => number };
             updatedAt?: { toMillis?: () => number };
           };
+          const pendingOverride = overrides[docSnap.id];
+          if (!isAdminUser && pendingOverride && data.ownerId === user.uid) {
+            delete overrides[docSnap.id];
+            overridesDirty = true;
+            void updateDoc(doc(db, 'users', user.uid, 'reports', docSnap.id), {
+              status: pendingOverride.status,
+              catatanVerifikasi: pendingOverride.catatanVerifikasi || '',
+              updatedAt: serverTimestamp(),
+            }).catch(() => {});
+          }
           return {
             ...data,
+            status: normalizeReportStatus(pendingOverride ? pendingOverride.status : data.status),
+            catatanVerifikasi:
+              pendingOverride && pendingOverride.catatanVerifikasi !== undefined
+                ? pendingOverride.catatanVerifikasi
+                : data.catatanVerifikasi || '',
             id: docSnap.id,
           };
         });
+
+        if (overridesDirty) {
+          writeOperatorOverrides(overrides);
+        }
 
         items.sort((a, b) => {
           const tA = (a.updatedAt as { toMillis?: () => number } | undefined)?.toMillis?.() || 0;
           const tB = (b.updatedAt as { toMillis?: () => number } | undefined)?.toMillis?.() || 0;
           return tB - tA;
         });
+
+        if (!isAdminUser) {
+          try {
+            localStorage.setItem(`silaper_local_reports_fb_${user.uid}`, JSON.stringify(items));
+          } catch {
+            // Ignore storage quota errors
+          }
+        }
 
         setSavedReports(items);
         setLoadingReports(false);
@@ -551,11 +832,11 @@ export default function App() {
     );
 
     return () => unsubscribe();
-  }, [authReady, user, accessGranted, hasLocalSession]);
+  }, [authReady, user, accessGranted, hasLocalSession, isAdminUser]);
 
-  // Attach real-time Firestore listener for Admin's authorizedStaff allowlist (or local registry in temp-admin mode)
+  // Attach real-time Firestore listener for Admin's authorizedStaff allowlist (or local registry in temp-admin/operator mode)
   useEffect(() => {
-    if (isTempAdmin && !user && accessGranted) {
+    if ((isTempAdmin || isOperator) && !user && accessGranted) {
       const localRows = readLocalStaffRegistry();
       localRows.sort((a, b) => a.displayName.localeCompare(b.displayName));
       setStaffList(localRows);
@@ -594,7 +875,7 @@ export default function App() {
     );
 
     return () => unsubscribe();
-  }, [authReady, user, accessGranted, isAdminUser, isTempAdmin, hasLocalSession]);
+  }, [authReady, user, accessGranted, isAdminUser, isTempAdmin, isOperator, hasLocalSession]);
 
   const handleLoginWithEmail = async (identifier: string, password: string) => {
     setLoginError(null);
@@ -604,20 +885,52 @@ export default function App() {
     if (cleanIdentifier.toLowerCase() === 'admin' && password === 'admin') {
       try {
         sessionStorage.setItem(TEMP_ADMIN_STORAGE_KEY, '1');
+        sessionStorage.removeItem(TEMP_OPERATOR_STORAGE_KEY);
       } catch {
         // Ignore storage error
       }
       writeActiveStaffSession(null);
+      resetEditorWorkspace();
       setLocalStaff(null);
+      setIsOperator(false);
       setIsTempAdmin(true);
       setNeedsEmailVerification(false);
       setAccessGranted(true);
       setAuthReady(true);
       setProfileName('Administrator SILAPER');
       setProfileInstansi('Pemerintah Kecamatan Tarik');
-      setSavedReports(readLocalReports());
+      setSavedReports(readAllLocalReports());
+      const localRows = readLocalStaffRegistry();
+      localRows.sort((a, b) => a.displayName.localeCompare(b.displayName));
+      setStaffList(localRows);
       setActiveTab('home');
       showToast('success', 'Masuk dengan akses penuh sementara (Admin).');
+      return;
+    }
+
+    if (cleanIdentifier.toLowerCase() === 'operator' && password === 'operator') {
+      try {
+        sessionStorage.setItem(TEMP_OPERATOR_STORAGE_KEY, '1');
+        sessionStorage.removeItem(TEMP_ADMIN_STORAGE_KEY);
+      } catch {
+        // Ignore storage error
+      }
+      writeActiveStaffSession(null);
+      resetEditorWorkspace();
+      setLocalStaff(null);
+      setIsTempAdmin(false);
+      setIsOperator(true);
+      setNeedsEmailVerification(false);
+      setAccessGranted(true);
+      setAuthReady(true);
+      setProfileName('Operator SILAPER');
+      setProfileInstansi('Pemerintah Kecamatan Tarik');
+      setSavedReports(readAllLocalReports());
+      const localRows = readLocalStaffRegistry();
+      localRows.sort((a, b) => a.displayName.localeCompare(b.displayName));
+      setStaffList(localRows);
+      setActiveTab('home');
+      showToast('success', 'Masuk sebagai Operator Verifikator SPD SILAPER.');
       return;
     }
 
@@ -635,7 +948,7 @@ export default function App() {
       if (matchedStaff) {
         if (!matchedStaff.active) {
           setLoginError(
-            `Akun staf ${matchedStaff.displayName} (NIP. ${matchedStaff.nip}) sedang dinonaktifkan oleh Administrator.`,
+            `Akun user ${matchedStaff.displayName} (NIP. ${matchedStaff.nip}) sedang dinonaktifkan oleh Administrator.`,
           );
           return;
         }
@@ -645,16 +958,19 @@ export default function App() {
           matchedStaff.passwordHash,
         );
         if (!passwordValid) {
-          setLoginError('Password akun staf tidak sesuai.');
+          setLoginError('Password akun tidak sesuai.');
           return;
         }
 
         try {
           sessionStorage.removeItem(TEMP_ADMIN_STORAGE_KEY);
+          sessionStorage.removeItem(TEMP_OPERATOR_STORAGE_KEY);
         } catch {
           // Ignore storage error
         }
         writeActiveStaffSession(matchedStaff);
+        resetEditorWorkspace();
+        setIsOperator(false);
         setIsTempAdmin(false);
         setLocalStaff(matchedStaff);
         setNeedsEmailVerification(false);
@@ -662,7 +978,7 @@ export default function App() {
         setAuthReady(true);
         setProfileName(matchedStaff.displayName);
         setProfileInstansi(matchedStaff.jabatan || 'Pemerintah Kecamatan Tarik');
-        setSavedReports(readLocalReports(matchedStaff.nipKey));
+        setSavedReports(readScopedUserReports(matchedStaff.nipKey));
         setActiveTab('home');
         showToast('success', `Selamat datang, ${matchedStaff.displayName}.`);
         return;
@@ -747,8 +1063,13 @@ export default function App() {
     try {
       if (typeof window !== 'undefined') {
         sessionStorage.removeItem(TEMP_ADMIN_STORAGE_KEY);
+        sessionStorage.removeItem(TEMP_OPERATOR_STORAGE_KEY);
       }
       writeActiveStaffSession(null);
+      resetEditorWorkspace();
+      setSavedReports([]);
+      setStaffList([]);
+      setIsOperator(false);
       setIsTempAdmin(false);
       setLocalStaff(null);
       setAccessGranted(false);
@@ -771,7 +1092,7 @@ export default function App() {
     password: string;
     email: string;
   }): Promise<boolean> => {
-    if (!isAdminUser) return false;
+    if (!canManageStaff) return false;
     const cleanNip = input.nip.trim().slice(0, STAFF_FIELD_LIMITS.nip);
     const nipKey = normalizeNipKey(cleanNip).slice(0, STAFF_FIELD_LIMITS.nipKey);
     const cleanName = input.displayName.trim().slice(0, STAFF_FIELD_LIMITS.displayName);
@@ -823,10 +1144,10 @@ export default function App() {
       passwordHash,
       email: cleanEmail,
       active: true,
-      addedBy: user ? user.uid : 'temp-admin',
+      addedBy: user ? user.uid : isOperator ? 'operator' : 'temp-admin',
     };
 
-    if (!user && isTempAdmin) {
+    if (!user && (isTempAdmin || isOperator)) {
       setStaffList((prev) => {
         const filtered = prev.filter((item) => item.id !== nipKey);
         const next: AuthorizedStaff[] = [...filtered, newStaffEntry];
@@ -868,7 +1189,7 @@ export default function App() {
   };
 
   const handleEditAuthorizedStaff = async (input: EditStaffInput): Promise<boolean> => {
-    if (!isAdminUser) return false;
+    if (!canManageStaff) return false;
     const existing = staffList.find((item) => item.id === input.id);
     if (!existing) {
       showToast('error', 'Data akun staf yang akan diubah tidak ditemukan.');
@@ -937,7 +1258,7 @@ export default function App() {
       passwordHash,
     };
 
-    if (!user && isTempAdmin) {
+    if (!user && (isTempAdmin || isOperator)) {
       setStaffList((prev) => {
         const next = prev.map((item) => (item.id === existing.id ? updatedEntry : item));
         next.sort((a, b) => a.displayName.localeCompare(b.displayName));
@@ -1012,8 +1333,8 @@ export default function App() {
   };
 
   const handleToggleStaffActive = async (staff: AuthorizedStaff) => {
-    if (!isAdminUser) return;
-    if (!user && isTempAdmin) {
+    if (!canManageStaff) return;
+    if (!user && (isTempAdmin || isOperator)) {
       setStaffList((prev) => {
         const next = prev.map((item) =>
           item.id === staff.id ? { ...item, active: !item.active } : item,
@@ -1048,8 +1369,8 @@ export default function App() {
   };
 
   const handleDeleteAuthorizedStaff = async (staffId: string) => {
-    if (!isAdminUser) return;
-    if (!user && isTempAdmin) {
+    if (!canManageStaff) return;
+    if (!user && (isTempAdmin || isOperator)) {
       setStaffList((prev) => {
         const next = prev.filter((item) => item.id !== staffId);
         writeLocalStaffRegistry(next);
@@ -1070,54 +1391,125 @@ export default function App() {
     }
   };
 
-  const handleOpenEditProfile = () => {
+  const handleOpenAccount = () => {
     setProfileMenuOpen(false);
-    setDraftProfileName(profileName);
-    setDraftProfileInstansi(profileInstansi);
-    setEditProfileOpen(true);
+    setActiveTab('account');
   };
 
-  const handleSaveProfile = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const cleanName = draftProfileName.trim().slice(0, 120);
-    const cleanInstansi = draftProfileInstansi.trim().slice(0, 160);
+  const handleSaveOwnAccountProfile = async (input: {
+    displayName: string;
+    instansi: string;
+    email?: string;
+  }): Promise<boolean> => {
+    const cleanName = input.displayName.trim().slice(0, STAFF_FIELD_LIMITS.displayName);
+    const cleanInstansi = input.instansi.trim().slice(0, STAFF_FIELD_LIMITS.jabatan);
+    const cleanEmail = (input.email ?? '').trim().toLowerCase().slice(0, STAFF_FIELD_LIMITS.email);
 
     if (!cleanName) {
-      showToast('error', 'Nama pengguna wajib diisi.');
-      return;
+      showToast('error', 'Nama lengkap wajib diisi.');
+      return false;
     }
 
-    setIsSavingProfile(true);
-    try {
-      if (user) {
-        const profilePath = `users/${user.uid}`;
-        const profileRef = doc(db, 'users', user.uid);
-        try {
-          await updateDoc(profileRef, {
-            displayName: cleanName,
-            instansi: cleanInstansi || 'Pemerintah Kecamatan',
-            updatedAt: serverTimestamp(),
-          });
-          await updateProfile(user, { displayName: cleanName });
-        } catch (err) {
-          handleFirestoreError(err, OperationType.UPDATE, profilePath);
-        }
-      } else if (localStaff) {
-        const updatedStaff: AuthorizedStaff = {
-          ...localStaff,
+    if (user) {
+      const profilePath = `users/${user.uid}`;
+      const profileRef = doc(db, 'users', user.uid);
+      try {
+        await updateDoc(profileRef, {
           displayName: cleanName,
-          jabatan: cleanInstansi || localStaff.jabatan,
-        };
-        setLocalStaff(updatedStaff);
-        writeActiveStaffSession(updatedStaff);
+          instansi: cleanInstansi || 'Pemerintah Kecamatan Tarik',
+          updatedAt: serverTimestamp(),
+        });
+        await updateProfile(user, { displayName: cleanName });
+        setProfileName(cleanName);
+        setProfileInstansi(cleanInstansi || 'Pemerintah Kecamatan Tarik');
+        showToast('success', 'Profil akun berhasil diperbarui.');
+        return true;
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, profilePath);
+        return false;
       }
+    }
 
+    if (localStaff) {
+      const updatedStaff: AuthorizedStaff = {
+        ...localStaff,
+        displayName: cleanName,
+        jabatan: cleanInstansi || localStaff.jabatan,
+        email: input.email !== undefined ? cleanEmail : localStaff.email,
+      };
+      const existingRegistry = readLocalStaffRegistry();
+      const foundInRegistry = existingRegistry.some((item) => item.id === localStaff.id || item.nipKey === localStaff.nipKey);
+      const nextRegistry = foundInRegistry
+        ? existingRegistry.map((item) =>
+            item.id === localStaff.id || item.nipKey === localStaff.nipKey ? updatedStaff : item,
+          )
+        : [...existingRegistry, updatedStaff];
+      nextRegistry.sort((a, b) => a.displayName.localeCompare(b.displayName));
+      writeLocalStaffRegistry(nextRegistry);
+      writeActiveStaffSession(updatedStaff);
+      setLocalStaff(updatedStaff);
+      setStaffList(nextRegistry);
       setProfileName(cleanName);
-      setProfileInstansi(cleanInstansi || 'Pemerintah Kecamatan');
-      setEditProfileOpen(false);
-      showToast('success', 'Profil pengguna berhasil diperbarui.');
-    } finally {
-      setIsSavingProfile(false);
+      setProfileInstansi(updatedStaff.jabatan || 'Pemerintah Kecamatan Tarik');
+      showToast('success', 'Data akun Anda berhasil diperbarui.');
+      return true;
+    }
+
+    setProfileName(cleanName);
+    setProfileInstansi(cleanInstansi || 'Pemerintah Kecamatan Tarik');
+    showToast('success', 'Profil tampilan berhasil diperbarui.');
+    return true;
+  };
+
+  const handleChangeOwnStaffPassword = async (
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<{ ok: boolean; error?: string }> => {
+    if (!localStaff) {
+      return { ok: false, error: 'Akun aktif tidak mendukung perubahan kata sandi lokal.' };
+    }
+
+    const validCurrent = await verifyStaffPassword(
+      currentPassword,
+      localStaff.passwordSalt,
+      localStaff.passwordHash,
+    );
+    if (!validCurrent) {
+      return { ok: false, error: 'Kata sandi saat ini tidak sesuai.' };
+    }
+
+    const newSalt = generateSaltHex();
+    const newHash = await hashStaffPassword(newPassword, newSalt);
+    const updatedStaff: AuthorizedStaff = {
+      ...localStaff,
+      passwordSalt: newSalt,
+      passwordHash: newHash,
+    };
+
+    const existingRegistry = readLocalStaffRegistry();
+    const nextRegistry = existingRegistry.some((item) => item.id === localStaff.id || item.nipKey === localStaff.nipKey)
+      ? existingRegistry.map((item) =>
+          item.id === localStaff.id || item.nipKey === localStaff.nipKey ? updatedStaff : item,
+        )
+      : [...existingRegistry, updatedStaff];
+
+    writeLocalStaffRegistry(nextRegistry);
+    writeActiveStaffSession(updatedStaff);
+    setLocalStaff(updatedStaff);
+    setStaffList(nextRegistry);
+    showToast('success', 'Kata sandi akun berhasil diperbarui.');
+    return { ok: true };
+  };
+
+  const handleSendOwnPasswordReset = async (
+    email: string,
+  ): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      await sendPasswordResetEmail(auth, email.trim());
+      showToast('success', `Tautan atur ulang kata sandi telah dikirim ke ${email.trim()}.`);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: mapFirebaseAuthError(err) };
     }
   };
 
@@ -1200,9 +1592,7 @@ export default function App() {
         alamatKecamatan: extracted.alamatKecamatan || prev.alamatKecamatan,
         nomorSpt: extracted.nomorSpt || prev.nomorSpt,
         tanggalSpt: extracted.tanggalSpt || prev.tanggalSpt,
-        dasarHukum: uploadedDasarCitation
-          ? appendDasarToText(extracted.dasarHukum || prev.dasarHukum, uploadedDasarCitation)
-          : extracted.dasarHukum || prev.dasarHukum,
+        dasarHukum: extracted.dasarHukum || prev.dasarHukum,
         namaPegawai: extracted.namaPegawai || prev.namaPegawai,
         nip: extracted.nip || prev.nip,
         pangkatGolongan: extracted.pangkatGolongan || prev.pangkatGolongan,
@@ -1227,61 +1617,50 @@ export default function App() {
     setIsUnlocked(false);
   };
 
-  const handleApplyExtractedDasar = (
-    extracted: ExtractedSuratDasar,
-    _sourceFileName: string,
-  ) => {
-    const cleanEntry = cleanSingleDasarEntry(extracted.dasarSurat || '');
-    if (cleanEntry) {
-      setUploadedDasarCitation(cleanEntry);
-    }
-
+  const handleSaveSptPdf = (attachment: SptAttachmentPayload) => {
     setReport((prev) => ({
       ...prev,
-      dasarHukum: cleanEntry ? appendDasarToText(prev.dasarHukum, cleanEntry) : prev.dasarHukum,
-      tujuan: prev.tujuan.trim() ? prev.tujuan : extracted.tujuan || prev.tujuan,
-      maksudPerjalanan: prev.maksudPerjalanan.trim()
-        ? prev.maksudPerjalanan
-        : extracted.maksudPerjalanan || prev.maksudPerjalanan,
-      tanggalBerangkat: prev.tanggalBerangkat.trim()
-        ? prev.tanggalBerangkat
-        : extracted.tanggalBerangkat || prev.tanggalBerangkat,
-      tanggalKembali: prev.tanggalKembali.trim()
-        ? prev.tanggalKembali
-        : extracted.tanggalKembali || prev.tanggalKembali,
-    }));
-    setShowRequiredErrors(false);
-  };
-
-  const handleClearExtractedDasar = (previousDasarEntry: string) => {
-    const targetToRemove = previousDasarEntry || uploadedDasarCitation;
-    setUploadedDasarCitation('');
-    if (!targetToRemove) return;
-    setReport((prev) => ({
-      ...prev,
-      dasarHukum: removeDasarFromText(prev.dasarHukum, targetToRemove),
+      sptPdfId: attachment.sptPdfId,
+      sptPdfName: attachment.sptPdfName,
+      sptPdfSize: attachment.sptPdfSize,
+      sptPdfDataUrl: attachment.sptPdfDataUrl,
     }));
   };
 
-  const handleFillDemoData = () => {
-    setReport({
-      ...SAMPLE_FULL_REPORT,
-      logoDataUrl: SAMPLE_FULL_REPORT.logoDataUrl || '',
-      kopBannerDataUrl: SAMPLE_FULL_REPORT.kopBannerDataUrl || '',
-      photos: SAMPLE_FULL_REPORT.photos.map((p) => ({ ...p })),
-    });
-    setUploadedDasarCitation('');
-    setFormSessionKey((prev) => prev + 1);
-    setIsUnlocked(false);
-    setShowRequiredErrors(false);
-    setActiveReportId(null);
-    setActiveReportOriginalStatus(null);
-    showToast('success', 'Contoh Data Cepat berhasil dimuat (kolom terkunci otomatis).');
+  const handleSaveSuratDasarPdf = (attachment: SuratDasarAttachmentPayload) => {
+    setReport((prev) => ({
+      ...prev,
+      suratDasarPdfId: attachment.suratDasarPdfId,
+      suratDasarPdfName: attachment.suratDasarPdfName,
+      suratDasarPdfSize: attachment.suratDasarPdfSize,
+      suratDasarPdfDataUrl: attachment.suratDasarPdfDataUrl,
+    }));
+  };
+
+  const handleClearSuratDasarPdf = () => {
+    setReport((prev) => ({
+      ...prev,
+      suratDasarPdfId: '',
+      suratDasarPdfName: '',
+      suratDasarPdfSize: 0,
+      suratDasarPdfDataUrl: '',
+    }));
   };
 
   const handleResetReport = () => {
+    if (
+      report.sptPdfId &&
+      !savedReports.some((item) => item.sptPdfId === report.sptPdfId)
+    ) {
+      void deleteSuratDasarPdf(report.sptPdfId, currentOwnerId, canVerifyReports);
+    }
+    if (
+      report.suratDasarPdfId &&
+      !savedReports.some((item) => item.suratDasarPdfId === report.suratDasarPdfId)
+    ) {
+      void deleteSuratDasarPdf(report.suratDasarPdfId, currentOwnerId, canVerifyReports);
+    }
     setReport(createEmptyReport());
-    setUploadedDasarCitation('');
     setFormSessionKey((prev) => prev + 1);
     setIsUnlocked(false);
     setShowRequiredErrors(false);
@@ -1292,10 +1671,10 @@ export default function App() {
 
   const handleStartNewReport = () => {
     setReport(createEmptyReport());
-    setUploadedDasarCitation('');
     setFormSessionKey((prev) => prev + 1);
     setIsUnlocked(false);
     setShowRequiredErrors(false);
+    setIsAutoFitZoom(true);
     setActiveReportId(null);
     setActiveReportOriginalStatus(null);
     setToast(null);
@@ -1314,10 +1693,10 @@ export default function App() {
     }
 
     if (!user && hasLocalSession) {
-      const localOwner = localStaff ? localStaff.nipKey : 'temp-admin';
-      const storageScope = localStaff ? localStaff.nipKey : undefined;
+      const localOwner = localStaff ? localStaff.nipKey : isOperator ? 'operator' : 'temp-admin';
+      const storageScope = localStaff ? localStaff.nipKey : isOperator ? 'operator' : undefined;
       const sanitizedLocal = sanitizeReportForFirestore(
-        { ...report, status: 'draft' },
+        { ...report, status: 'diajukan' },
         localOwner,
       );
       const targetId =
@@ -1327,18 +1706,40 @@ export default function App() {
         ...sanitizedLocal,
         id: targetId,
       };
-      setSavedReports((prev) => {
-        const next = [entry, ...prev.filter((r) => r.id !== targetId)];
-        writeLocalReports(next, storageScope);
-        return next;
-      });
+
+      if (canVerifyReports) {
+        const updatedExisting =
+          Boolean(activeReportId) &&
+          updateReportInLocalBuckets(targetId, (prevItem) => ({
+            ...entry,
+            ownerId: prevItem.ownerId || localOwner,
+          }));
+        if (!updatedExisting) {
+          const currentScoped = readLocalReports(storageScope);
+          const nextScoped = [entry, ...currentScoped.filter((r) => r.id !== targetId)];
+          writeLocalReports(nextScoped, storageScope);
+        }
+        setSavedReports(readAllLocalReports());
+      } else if (localStaff) {
+        // Strict per-user isolation: write only within user's own bucket
+        const currentScoped = readScopedUserReports(localStaff.nipKey);
+        const existingOwn = currentScoped.find((r) => r.id === targetId);
+        if (activeReportId && existingOwn && existingOwn.ownerId && existingOwn.ownerId !== localStaff.nipKey) {
+          showToast('error', 'Akses ditolak: Anda tidak berwenang mengubah pengajuan User lain.');
+          return;
+        }
+        const nextScoped = [entry, ...currentScoped.filter((r) => r.id !== targetId)];
+        writeLocalReports(nextScoped, localStaff.nipKey);
+        setSavedReports(nextScoped);
+      }
+
       setActiveReportId(targetId);
-      setActiveReportOriginalStatus('draft');
+      setActiveReportOriginalStatus('diajukan');
       showToast(
         'success',
         activeReportId
-          ? 'Perubahan laporan diperbarui di arsip lokal sesi Anda.'
-          : 'Laporan baru tersimpan di arsip lokal sesi Anda.',
+          ? 'Perubahan laporan SPD berhasil diajukan pada sesi Anda.'
+          : 'Laporan SPD baru berhasil diajukan dan tersimpan pada Daftar SPD Anda.',
       );
       return;
     }
@@ -1351,28 +1752,33 @@ export default function App() {
 
     setIsSaving(true);
     try {
+      const targetOwnerId =
+        (activeReportId &&
+          isAdminUser &&
+          savedReports.find((r) => r.id === activeReportId)?.ownerId) ||
+        user.uid;
       const sanitized = sanitizeReportForFirestore(
-        { ...report, status: 'draft' },
-        user.uid,
+        { ...report, status: 'diajukan' },
+        targetOwnerId,
       );
 
       if (activeReportId) {
-        const docPath = `users/${user.uid}/reports/${activeReportId}`;
-        const docRef = doc(db, 'users', user.uid, 'reports', activeReportId);
+        const docPath = `users/${targetOwnerId}/reports/${activeReportId}`;
+        const docRef = doc(db, 'users', targetOwnerId, 'reports', activeReportId);
         try {
-          if (activeReportOriginalStatus === 'final') {
+          if (activeReportOriginalStatus === 'diterima') {
             await updateDoc(docRef, {
-              status: 'draft',
+              status: 'diajukan',
               updatedAt: serverTimestamp(),
             });
-            setActiveReportOriginalStatus('draft');
+            setActiveReportOriginalStatus('diajukan');
           }
           const { ownerId: _ignoredOwner, ...updatableFields } = sanitized;
           await updateDoc(docRef, {
             ...updatableFields,
             updatedAt: serverTimestamp(),
           });
-          showToast('success', 'Perubahan laporan berhasil disimpan ke arsip rahasia.');
+          showToast('success', 'Perubahan laporan SPD berhasil diajukan.');
         } catch (err) {
           handleFirestoreError(err, OperationType.UPDATE, docPath);
         }
@@ -1387,8 +1793,8 @@ export default function App() {
             updatedAt: serverTimestamp(),
           });
           setActiveReportId(newId);
-          setActiveReportOriginalStatus('draft');
-          showToast('success', 'Laporan baru tersimpan aman pada Arsip Tersimpan.');
+          setActiveReportOriginalStatus('diajukan');
+          showToast('success', 'Laporan SPD baru berhasil diajukan dan tersimpan pada Daftar SPD.');
         } catch (err) {
           handleFirestoreError(err, OperationType.CREATE, docPath);
         }
@@ -1399,16 +1805,33 @@ export default function App() {
   };
 
   const handleLoadFromArchive = (stored: StoredTravelReport) => {
+    if (!canVerifyReports && stored.ownerId && currentOwnerId && stored.ownerId !== currentOwnerId) {
+      showToast(
+        'error',
+        'Akses ditolak: Anda tidak berwenang mengakses file atau pengajuan milik User lain.',
+      );
+      return;
+    }
     const { id, ownerId: _owner, createdAt: _c, updatedAt: _u, ...data } = stored;
+    const normalizedStatus = normalizeReportStatus(data.status);
     setReport({
       ...data,
+      status: normalizedStatus,
       logoDataUrl: data.logoDataUrl || '',
       kopBannerDataUrl: data.kopBannerDataUrl || '',
+      sptPdfId: data.sptPdfId || '',
+      sptPdfName: data.sptPdfName || '',
+      sptPdfSize: data.sptPdfSize || 0,
+      sptPdfDataUrl: data.sptPdfDataUrl || '',
+      suratDasarPdfId: data.suratDasarPdfId || '',
+      suratDasarPdfName: data.suratDasarPdfName || '',
+      suratDasarPdfSize: data.suratDasarPdfSize || 0,
+      suratDasarPdfDataUrl: data.suratDasarPdfDataUrl || '',
+      catatanVerifikasi: data.catatanVerifikasi || '',
       photos: (data.photos || []).map((p) => ({ ...p })),
     });
     setActiveReportId(id);
-    setActiveReportOriginalStatus(stored.status);
-    setUploadedDasarCitation('');
+    setActiveReportOriginalStatus(normalizedStatus);
     setFormSessionKey((prev) => prev + 1);
     setIsUnlocked(false);
     setShowRequiredErrors(false);
@@ -1416,74 +1839,150 @@ export default function App() {
     showToast('success', `Laporan SPT ${stored.nomorSpt} dimuat ke Editor.`);
   };
 
-  const handleToggleArchiveStatus = async (stored: StoredTravelReport) => {
-    const nextStatus: StoredTravelReport['status'] =
-      stored.status === 'final' ? 'draft' : 'final';
+  const handleChangeArchiveStatus = async (
+    stored: StoredTravelReport,
+    nextStatus: ReportStatus,
+    catatanVerifikasi?: string,
+  ) => {
+    if (!canVerifyReports) {
+      showToast('error', 'Hanya Operator atau Administrator yang dapat memverifikasi dan mengubah status SPD.');
+      return;
+    }
+
+    const cleanNote =
+      catatanVerifikasi !== undefined
+        ? catatanVerifikasi.slice(0, 500)
+        : stored.catatanVerifikasi || '';
+
+    const statusMessage =
+      nextStatus === 'diterima'
+        ? `Laporan ${stored.nomorSpt} diverifikasi dan ditandai Diterima.`
+        : nextStatus === 'ditolak'
+          ? `Laporan ${stored.nomorSpt} ditandai Ditolak.`
+          : `Status laporan ${stored.nomorSpt} diubah menjadi Diajukan.`;
+
     if (!user && hasLocalSession) {
-      const storageScope = localStaff ? localStaff.nipKey : undefined;
-      setSavedReports((prev) => {
-        const next = prev.map((item) =>
-          item.id === stored.id ? { ...item, status: nextStatus } : item,
+      const updated = updateReportInLocalBuckets(stored.id, (item) => ({
+        ...item,
+        status: nextStatus,
+        catatanVerifikasi: cleanNote,
+      }));
+      if (!updated) {
+        const storageScope = localStaff
+          ? localStaff.nipKey
+          : isOperator
+            ? 'operator'
+            : undefined;
+        const current = readLocalReports(storageScope);
+        writeLocalReports(
+          current.map((item) =>
+            item.id === stored.id
+              ? { ...item, status: nextStatus, catatanVerifikasi: cleanNote }
+              : item,
+          ),
+          storageScope,
         );
-        writeLocalReports(next, storageScope);
-        return next;
-      });
+      }
+      setSavedReports(
+        isTempAdmin || isOperator
+          ? readAllLocalReports()
+          : readLocalReports(localStaff?.nipKey),
+      );
       if (activeReportId === stored.id) {
         setActiveReportOriginalStatus(nextStatus);
-        setReport((prev) => ({ ...prev, status: nextStatus }));
+        setReport((prev) => ({
+          ...prev,
+          status: nextStatus,
+          catatanVerifikasi: cleanNote,
+        }));
       }
-      showToast(
-        'success',
-        nextStatus === 'final'
-          ? `Laporan ${stored.nomorSpt} ditandai Final.`
-          : `Laporan ${stored.nomorSpt} dibuka kembali sebagai Draf.`,
-      );
+      showToast('success', statusMessage);
       return;
     }
 
     if (!user) return;
-    const docPath = `users/${user.uid}/reports/${stored.id}`;
-    const docRef = doc(db, 'users', user.uid, 'reports', stored.id);
+    const targetOwnerId = stored.ownerId || user.uid;
+    const docPath = `users/${targetOwnerId}/reports/${stored.id}`;
+    const docRef = doc(db, 'users', targetOwnerId, 'reports', stored.id);
     try {
       await updateDoc(docRef, {
         status: nextStatus,
+        catatanVerifikasi: cleanNote,
         updatedAt: serverTimestamp(),
       });
       if (activeReportId === stored.id) {
         setActiveReportOriginalStatus(nextStatus);
-        setReport((prev) => ({ ...prev, status: nextStatus }));
+        setReport((prev) => ({
+          ...prev,
+          status: nextStatus,
+          catatanVerifikasi: cleanNote,
+        }));
       }
-      showToast(
-        'success',
-        nextStatus === 'final'
-          ? `Laporan ${stored.nomorSpt} ditandai Final.`
-          : `Laporan ${stored.nomorSpt} dibuka kembali sebagai Draf.`,
-      );
+      showToast('success', statusMessage);
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, docPath);
     }
   };
 
   const handleDeleteArchive = async (reportId: string) => {
+    const targetReport = savedReports.find((item) => item.id === reportId);
+    if (!targetReport) {
+      showToast('error', 'Data laporan tidak ditemukan pada daftar Anda.');
+      return;
+    }
+    if (
+      !canVerifyReports &&
+      targetReport.ownerId &&
+      currentOwnerId &&
+      targetReport.ownerId !== currentOwnerId
+    ) {
+      showToast(
+        'error',
+        'Akses ditolak: Anda tidak berwenang menghapus pengajuan atau file milik User lain.',
+      );
+      return;
+    }
+
+    if (targetReport?.sptPdfId) {
+      void deleteSuratDasarPdf(targetReport.sptPdfId, currentOwnerId, canVerifyReports);
+    }
+    if (targetReport?.suratDasarPdfId) {
+      void deleteSuratDasarPdf(targetReport.suratDasarPdfId, currentOwnerId, canVerifyReports);
+    }
+
     if (!user && hasLocalSession) {
-      const storageScope = localStaff ? localStaff.nipKey : undefined;
-      setSavedReports((prev) => {
-        const next = prev.filter((item) => item.id !== reportId);
-        writeLocalReports(next, storageScope);
-        return next;
-      });
+      if (canVerifyReports) {
+        const removed = deleteReportFromLocalBuckets(reportId);
+        if (!removed) {
+          const storageScope = isOperator ? 'operator' : undefined;
+          writeLocalReports(
+            readLocalReports(storageScope).filter((item) => item.id !== reportId),
+            storageScope,
+          );
+        }
+        setSavedReports(readAllLocalReports());
+      } else if (localStaff) {
+        // Strict isolation: mutate only user's own bucket
+        const nextScoped = readScopedUserReports(localStaff.nipKey).filter(
+          (item) => item.id !== reportId,
+        );
+        writeLocalReports(nextScoped, localStaff.nipKey);
+        setSavedReports(nextScoped);
+      }
+
       if (activeReportId === reportId) {
         setActiveReportId(null);
         setActiveReportOriginalStatus(null);
       }
-      showToast('success', 'Laporan berhasil dihapus dari arsip lokal.');
+      showToast('success', 'Laporan berhasil dihapus dari arsip.');
       return;
     }
 
     if (!user) return;
-    const docPath = `users/${user.uid}/reports/${reportId}`;
+    const targetOwnerId = canVerifyReports ? (targetReport.ownerId || user.uid) : user.uid;
+    const docPath = `users/${targetOwnerId}/reports/${reportId}`;
     try {
-      await deleteDoc(doc(db, 'users', user.uid, 'reports', reportId));
+      await deleteDoc(doc(db, 'users', targetOwnerId, 'reports', reportId));
       if (activeReportId === reportId) {
         setActiveReportId(null);
         setActiveReportOriginalStatus(null);
@@ -1552,15 +2051,10 @@ export default function App() {
     },
     {
       id: 'archive',
-      label: 'SPPD',
+      label: 'Daftar SPD',
       icon: <Archive className="w-4 h-4 shrink-0" />,
     },
-    {
-      id: 'guide',
-      label: 'Panduan SPT',
-      icon: <BookOpen className="w-4 h-4 shrink-0" />,
-    },
-    ...(isAdminUser
+    ...(canManageStaff
       ? [
           {
             id: 'staff' as ActiveTab,
@@ -1569,6 +2063,20 @@ export default function App() {
           },
         ]
       : []),
+    ...(isRegularUser
+      ? [
+          {
+            id: 'account' as ActiveTab,
+            label: 'Kelola Akun',
+            icon: <UserPen className="w-4 h-4 shrink-0" />,
+          },
+        ]
+      : []),
+    {
+      id: 'guide',
+      label: 'Panduan SPT',
+      icon: <BookOpen className="w-4 h-4 shrink-0" />,
+    },
   ];
 
   if (!hasLocalSession && (!authReady || isCheckingAccess)) {
@@ -1705,10 +2213,14 @@ export default function App() {
               <p className="text-xs font-semibold text-white truncate">
                 {profileName}
               </p>
-              {(user?.email || isTempAdmin || localStaff) && (
+              {(user?.email || isTempAdmin || isOperator || localStaff) && (
                 <p className="text-[11px] text-slate-300 truncate mt-0.5">
                   {user?.email ||
-                    (localStaff ? `NIP. ${localStaff.nip}` : 'Akses Sementara (admin)')}
+                    (localStaff
+                      ? `NIP. ${localStaff.nip} · User`
+                      : isOperator
+                        ? 'Akses Operator Verifikator'
+                        : 'Akses Sementara (admin)')}
                 </p>
               )}
             </div>
@@ -1772,14 +2284,16 @@ export default function App() {
                 {activeTab === 'home'
                   ? 'Beranda'
                   : activeTab === 'editor'
-                    ? activeReportId
+                    ? activeReportId || isOperator
                       ? 'Sunting Laporan Perjalanan Dinas'
-                      : 'Buat SPPD Baru'
+                      : 'Buat Laporan/Ajukan SPD Baru'
                     : activeTab === 'archive'
-                      ? 'SPPD'
+                      ? 'Daftar SPD'
                       : activeTab === 'staff'
                         ? 'Kelola Akun Staf'
-                        : 'Panduan SPT'}
+                        : activeTab === 'account'
+                          ? 'Kelola Akun'
+                          : 'Panduan SPT'}
               </span>
             )}
           </div>
@@ -1805,25 +2319,25 @@ export default function App() {
               <div
                 role="menu"
                 aria-label="Opsi profil"
-                className="absolute right-0 top-full mt-2 w-52 bg-white text-[#0F172A] border border-[#D8E0EB] rounded-lg shadow-lg py-1.5 z-50"
+                className="absolute right-0 top-full mt-2 w-56 bg-white text-[#0F172A] border border-[#D8E0EB] rounded-lg shadow-lg py-1.5 z-50"
               >
                 <div className="px-3.5 py-2 border-b border-[#E2E8F0]">
                   <p className="text-xs font-semibold text-[#0F172A] truncate">
                     {profileName}
                   </p>
                   <p className="text-[11px] text-[#64748B] truncate mt-0.5">
-                    {user?.email || (localStaff ? `NIP. ${localStaff.nip}` : profileInstansi)}
+                    {user?.email || (localStaff ? `NIP. ${localStaff.nip} · User` : profileInstansi)}
                   </p>
                 </div>
 
                 <button
                   type="button"
                   role="menuitem"
-                  onClick={handleOpenEditProfile}
+                  onClick={handleOpenAccount}
                   className="w-full flex items-center gap-2.5 px-3.5 py-2 text-xs font-medium text-[#0F172A] hover:bg-[#F1F5F9] transition-colors text-left"
                 >
                   <UserPen className="w-3.5 h-3.5 text-[#0F2A56]" />
-                  <span>Edit Profile</span>
+                  <span>Kelola Akun</span>
                 </button>
 
                 <button
@@ -1840,65 +2354,93 @@ export default function App() {
           </div>
         </header>
 
-        {/* Action Toolbar */}
+        {/* Action Toolbar (Frozen on scroll; collapsible on mobile) */}
         {activeTab === 'editor' && (
-          <div className="no-print bg-white border-b border-[#D8E0EB]">
-            <div className="px-6 py-3 flex flex-wrap items-center justify-between gap-4">
-              <div className="flex flex-wrap items-center gap-2.5 text-xs text-[#475569]">
-                <button
-                  type="button"
-                  onClick={() => handleSelectTab('archive')}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-[#0F2A56] bg-[#F8FAFC] border border-[#CBD5E1] rounded-md hover:bg-[#EFF6FF] hover:border-[#BFDBFE] transition-colors whitespace-nowrap shrink-0"
-                >
-                  <ArrowLeft className="w-3.5 h-3.5" />
-                  Kembali ke Arsip
-                </button>
-                <span className="font-semibold text-[#0F172A]">
-                  Sistem Laporan Perjalanan Dinas Kecamatan Tarik
-                </span>
-                {activeReportId && (
-                  <>
-                    <span aria-hidden="true">·</span>
-                    <span className="font-mono-tabular text-[#0F2A56] font-medium">
+          <div
+            ref={actionToolbarRef}
+            className="no-print sticky top-14 z-10 bg-white border-b border-[#D8E0EB] shadow-[0_2px_8px_rgba(15,23,42,0.06)]"
+          >
+            <div className="w-full max-w-[1920px] mx-auto px-4 sm:px-6 py-2 md:py-3 flex flex-col md:flex-row md:flex-wrap md:items-center md:justify-between gap-2.5 md:gap-3">
+              {/* Top Row: Back button + Title (desktop) + Mobile Hide/Show Toggle */}
+              <div className="flex items-center justify-between gap-2 w-full md:w-auto">
+                <div className="flex flex-wrap items-center gap-2.5 text-xs text-[#475569] min-w-0">
+                  <button
+                    type="button"
+                    onClick={() => handleSelectTab('archive')}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-[#0F2A56] bg-[#F8FAFC] border border-[#CBD5E1] rounded-md hover:bg-[#EFF6FF] hover:border-[#BFDBFE] transition-colors whitespace-nowrap shrink-0"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    Kembali Ke Daftar SPD
+                  </button>
+                  {activeReportId && (
+                    <span className="hidden md:inline font-mono-tabular text-[#0F2A56] font-medium">
                       Arsip Aktif: {report.nomorSpt || activeReportId}
                     </span>
-                  </>
-                )}
+                  )}
+                </div>
+
+                {/* Mobile-only Hide / Show Action Buttons Toggle */}
+                <button
+                  type="button"
+                  onClick={() => setMobileToolbarExpanded((prev) => !prev)}
+                  aria-expanded={mobileToolbarExpanded}
+                  aria-controls="editor-action-buttons-panel"
+                  className="md:hidden inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-[#0F2A56] bg-[#EFF6FF] border border-[#BFDBFE] rounded-md hover:bg-[#DBEAFE] transition-colors whitespace-nowrap shrink-0"
+                >
+                  {mobileToolbarExpanded ? (
+                    <>
+                      <ChevronUp className="w-3.5 h-3.5" />
+                      Sembunyikan
+                    </>
+                  ) : (
+                    <>
+                      <ChevronDown className="w-3.5 h-3.5" />
+                      Menu Aksi
+                    </>
+                  )}
+                </button>
               </div>
 
-              <div className="flex flex-col items-stretch lg:items-end gap-2">
+              {/* Collapsible Section on Mobile (always shown on md+) */}
+              <div
+                id="editor-action-buttons-panel"
+                className={`${
+                  mobileToolbarExpanded ? 'flex' : 'hidden md:flex'
+                } flex-col items-stretch lg:items-end gap-2 pt-1 border-t border-[#E2E8F0] md:pt-0 md:border-t-0`}
+              >
+                {activeReportId && (
+                  <div className="md:hidden font-mono-tabular text-[11px] font-medium text-[#0F2A56]">
+                    Arsip Aktif: {report.nomorSpt || activeReportId}
+                  </div>
+                )}
+
                 <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleFillDemoData}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[#0F2A56] bg-[#EFF6FF] border border-[#BFDBFE] rounded-md hover:bg-[#DBEAFE] transition-colors whitespace-nowrap shrink-0"
-                  >
-                    <Zap className="w-3.5 h-3.5" />
-                    Contoh Data Cepat
-                  </button>
+                  {!isOperator && (
+                    <button
+                      type="button"
+                      onClick={handleResetReport}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-[#475569] bg-white border border-[#CBD5E1] rounded-md hover:bg-[#F8FAFC] transition-colors whitespace-nowrap shrink-0"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      Reset
+                    </button>
+                  )}
 
-                  <button
-                    type="button"
-                    onClick={handleResetReport}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-[#475569] bg-white border border-[#CBD5E1] rounded-md hover:bg-[#F8FAFC] transition-colors whitespace-nowrap shrink-0"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    Reset
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={isSaving}
-                    onClick={handleSaveToArchive}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[#0F2A56] bg-white border border-[#0F2A56] rounded-md hover:bg-[#F8FAFC] disabled:opacity-60 transition-colors whitespace-nowrap shrink-0"
-                  >
-                    {isSaving ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <CloudUpload className="w-3.5 h-3.5" />
-                    )}
-                    {activeReportId ? 'Perbarui Arsip' : 'Simpan ke Arsip'}
-                  </button>
+                  {!isOperator && (
+                    <button
+                      type="button"
+                      disabled={isSaving}
+                      onClick={handleSaveToArchive}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[#0F2A56] bg-white border border-[#0F2A56] rounded-md hover:bg-[#F8FAFC] disabled:opacity-60 transition-colors whitespace-nowrap shrink-0"
+                    >
+                      {isSaving ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Send className="w-3.5 h-3.5" />
+                      )}
+                      Ajukan SPD
+                    </button>
+                  )}
 
                   <button
                     type="button"
@@ -1937,16 +2479,6 @@ export default function App() {
                     Cetak / Print
                   </button>
                 </div>
-
-                <div
-                  role="note"
-                  className="inline-flex items-center gap-2 rounded-md border border-[#BFDBFE] bg-[#EFF6FF] px-3 py-1.5 text-xs font-medium text-[#0F2A56]"
-                >
-                  <Info className="w-4 h-4 text-[#1E3A8A] shrink-0" />
-                  <span>
-                    Catatan: Proses ekstraksi &amp; penyusunan laporan akan dimulai secara otomatis begitu file PDF SPT diunggah.
-                  </span>
-                </div>
               </div>
             </div>
           </div>
@@ -1980,11 +2512,20 @@ export default function App() {
               profileName={profileName}
               profileInstansi={profileInstansi}
               accountSubLabel={
-                user?.email || (localStaff ? `NIP. ${localStaff.nip}` : isTempAdmin ? 'Akses Administrator' : undefined)
+                user?.email ||
+                (localStaff
+                  ? `NIP. ${localStaff.nip}`
+                  : isOperator
+                    ? 'Akses Operator Verifikator'
+                    : isTempAdmin
+                      ? 'Akses Administrator'
+                      : undefined)
               }
               reports={savedReports}
               loadingReports={loadingReports}
               isAdminUser={isAdminUser}
+              isOperator={isOperator}
+              canManageStaff={canManageStaff}
               staffCount={staffList.length}
               onCreateNewReport={handleStartNewReport}
               onOpenReport={handleLoadFromArchive}
@@ -1993,25 +2534,36 @@ export default function App() {
           )}
 
           {activeTab === 'editor' && (
-            <div className="px-6 py-6 flex flex-col xl:flex-row items-start gap-6">
-              {/* Left Column: Input Form */}
-              <div className="no-print w-full xl:w-[44%] shrink-0">
+            <div
+              style={
+                {
+                  '--toolbar-sticky-top': `${56 + actionToolbarHeight + 16}px`,
+                  '--preview-sticky-max-h': `calc(100vh - ${56 + actionToolbarHeight + 84}px)`,
+                } as React.CSSProperties
+              }
+              className="w-full max-w-[1920px] mx-auto px-4 sm:px-6 py-5 lg:py-6 grid grid-cols-1 lg:grid-cols-[minmax(360px,43%)_minmax(0,1fr)] xl:grid-cols-[minmax(440px,44%)_minmax(0,1fr)] 2xl:grid-cols-[minmax(520px,620px)_minmax(0,1fr)] items-start gap-5 xl:gap-6 print:block print:p-0"
+            >
+              {/* Left Column: All Groupboxes Stacked Vertically */}
+              <div className="no-print min-w-0 w-full">
                 <ReportForm
                   key={formSessionKey}
                   report={report}
                   isUnlocked={isUnlocked}
                   showRequiredErrors={showRequiredErrors}
+                  currentOwnerId={currentOwnerId}
+                  canAccessAllFiles={canVerifyReports}
                   onToggleUnlock={() => setIsUnlocked((prev) => !prev)}
                   onChangeField={handleFieldChange}
                   onApplyExtractedSpt={handleApplyExtractedSpt}
-                  onApplyExtractedDasar={handleApplyExtractedDasar}
-                  onClearExtractedDasar={handleClearExtractedDasar}
+                  onSaveSptPdf={handleSaveSptPdf}
+                  onSaveSuratDasarPdf={handleSaveSuratDasarPdf}
+                  onClearSuratDasarPdf={handleClearSuratDasarPdf}
                 />
               </div>
 
-              {/* Right Column: Official A4 Document Live Preview */}
-              <div className="w-full xl:w-[56%]">
-                <div className="no-print flex flex-wrap items-center justify-between gap-2.5 mb-3 px-1">
+              {/* Right Column: Official A4 Document Live Preview (Sticky on Wide Screens) */}
+              <div className="min-w-0 w-full lg:sticky lg:top-[var(--toolbar-sticky-top)] print:static print:w-full">
+                <div className="no-print flex flex-wrap items-center justify-between gap-2.5 mb-3 px-0.5">
                   <div className="min-w-0">
                     <div className="text-xs font-semibold text-[#334155]">
                       Live Preview Dokumen Resmi (Kertas A4)
@@ -2030,7 +2582,7 @@ export default function App() {
                     <button
                       type="button"
                       onClick={handleZoomOut}
-                      disabled={previewZoom <= 0.5}
+                      disabled={previewZoom <= 0.35}
                       aria-label="Perkecil pratinjau dokumen (Zoom Out)"
                       title="Perkecil (Zoom Out)"
                       className="px-2.5 py-1.5 text-[#334155] hover:bg-[#F1F5F9] hover:text-[#0F2A56] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -2063,7 +2615,11 @@ export default function App() {
                       type="button"
                       onClick={handleFitPreviewWidth}
                       title="Sesuaikan lebar kertas A4 ke panel pratinjau"
-                      className="px-2.5 py-1.5 text-[11px] font-medium text-[#0F2A56] bg-[#F8FAFC] border-l border-[#E2E8F0] hover:bg-[#EFF6FF] transition-colors whitespace-nowrap"
+                      className={`px-2.5 py-1.5 text-[11px] font-medium border-l border-[#E2E8F0] transition-colors whitespace-nowrap ${
+                        isAutoFitZoom
+                          ? 'bg-[#EFF6FF] text-[#0F2A56] font-semibold'
+                          : 'bg-[#F8FAFC] text-[#475569] hover:bg-[#EFF6FF] hover:text-[#0F2A56]'
+                      }`}
                     >
                       Pas Lebar
                     </button>
@@ -2072,7 +2628,7 @@ export default function App() {
 
                 <div
                   ref={previewWrapperRef}
-                  className="a4-sheet-wrapper bg-[#E2E8F0] border border-[#CBD5E1] rounded-lg p-4 md:p-6 xl:max-h-[calc(100vh-190px)] overflow-auto print:bg-white print:border-none print:p-0 print:max-h-none print:overflow-visible"
+                  className="a4-sheet-wrapper bg-[#E2E8F0] border border-[#CBD5E1] rounded-lg p-3 sm:p-4 lg:p-5 lg:max-h-[var(--preview-sticky-max-h)] overflow-auto print:bg-white print:border-none print:p-0 print:max-h-none print:overflow-visible"
                 >
                   <div
                     className="preview-zoom-box mx-auto"
@@ -2099,15 +2655,15 @@ export default function App() {
               user={user}
               authReady={authReady || hasLocalSession}
               isTempAdmin={isTempAdmin}
+              isOperator={isOperator}
               hasLocalSession={hasLocalSession}
-              localAccountLabel={
-                localStaff ? `${localStaff.displayName} (NIP. ${localStaff.nip})` : undefined
-              }
+              canVerifyReports={canVerifyReports}
+              currentOwnerId={currentOwnerId}
               reports={savedReports}
               loadingReports={loadingReports}
               activeReportId={activeReportId}
               onLoadReport={handleLoadFromArchive}
-              onToggleReportStatus={handleToggleArchiveStatus}
+              onChangeReportStatus={handleChangeArchiveStatus}
               onDeleteReport={handleDeleteArchive}
               onCreateNewReport={handleStartNewReport}
             />
@@ -2115,11 +2671,33 @@ export default function App() {
 
           {activeTab === 'guide' && <GuidePanel />}
 
-          {activeTab === 'staff' && isAdminUser && (
+          {activeTab === 'account' && (
+            <AccountPanel
+              roleLabel={accountRoleLabel}
+              profileName={profileName}
+              profileInstansi={profileInstansi}
+              accountEmail={user?.email || localStaff?.email || ''}
+              staffNip={localStaff?.nip}
+              isLocalStaff={Boolean(localStaff)}
+              isFirebaseUser={Boolean(user)}
+              onSaveProfile={handleSaveOwnAccountProfile}
+              onChangeStaffPassword={localStaff ? handleChangeOwnStaffPassword : undefined}
+              onSendPasswordResetEmail={user ? handleSendOwnPasswordReset : undefined}
+            />
+          )}
+
+          {activeTab === 'staff' && canManageStaff && (
             <StaffAdminPanel
               staffList={staffList}
               loadingStaff={loadingStaff}
               adminEmail={ADMIN_EMAIL}
+              managerLabel={
+                isOperator
+                  ? 'Operator SILAPER'
+                  : isTempAdmin
+                    ? 'Admin Sementara (admin)'
+                    : undefined
+              }
               onAddStaff={handleAddAuthorizedStaff}
               onEditStaff={handleEditAuthorizedStaff}
               onToggleStaffActive={handleToggleStaffActive}
@@ -2190,90 +2768,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Modal Edit Profile */}
-      {editProfileOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="edit-profile-title"
-          className="no-print fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
-        >
-          <div className="w-full max-w-md bg-white border border-[#D8E0EB] rounded-lg p-6 shadow-xl">
-            <h2
-              id="edit-profile-title"
-              className="text-base font-semibold text-[#0F172A]"
-            >
-              Edit Profile Pengguna
-            </h2>
-            <p className="text-xs text-[#475569] mt-1">
-              Sesuaikan nama tampilan staf dan unit instansi kecamatan Anda.
-            </p>
-
-            <form onSubmit={handleSaveProfile} className="mt-4 space-y-3.5">
-              <div>
-                <label
-                  htmlFor="editProfileName"
-                  className="block text-xs font-medium text-[#334155] mb-1"
-                >
-                  Nama Pengguna
-                </label>
-                <input
-                  id="editProfileName"
-                  type="text"
-                  required
-                  maxLength={120}
-                  value={draftProfileName}
-                  onChange={(e) => setDraftProfileName(e.target.value)}
-                  placeholder="Nama lengkap staf"
-                  className="w-full rounded-md border border-[#CBD5E1] bg-white px-3 py-2 text-sm text-[#0F172A] focus:border-[#0F2A56] focus:outline-none focus:ring-2 focus:ring-[#0F2A56]/15"
-                />
-              </div>
-
-              <div>
-                <label
-                  htmlFor="editProfileInstansi"
-                  className="block text-xs font-medium text-[#334155] mb-1"
-                >
-                  Instansi / Unit Kecamatan
-                </label>
-                <input
-                  id="editProfileInstansi"
-                  type="text"
-                  maxLength={160}
-                  value={draftProfileInstansi}
-                  onChange={(e) => setDraftProfileInstansi(e.target.value)}
-                  placeholder="Contoh: Kecamatan Cisarua"
-                  className="w-full rounded-md border border-[#CBD5E1] bg-white px-3 py-2 text-sm text-[#0F172A] focus:border-[#0F2A56] focus:outline-none focus:ring-2 focus:ring-[#0F2A56]/15"
-                />
-              </div>
-
-              {user?.email && (
-                <div className="text-xs text-[#64748B] pt-1">
-                  Email akun terverifikasi: <span className="font-medium text-[#334155]">{user.email}</span>
-                </div>
-              )}
-
-              <div className="pt-2 flex items-center justify-end gap-2.5">
-                <button
-                  type="button"
-                  onClick={() => setEditProfileOpen(false)}
-                  className="px-4 py-2 text-xs font-medium text-[#475569] bg-white border border-[#CBD5E1] rounded-md hover:bg-[#F8FAFC] transition-colors whitespace-nowrap"
-                >
-                  Batal
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSavingProfile}
-                  className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-[#0F2A56] rounded-md hover:bg-[#1E3A8A] disabled:opacity-60 transition-colors whitespace-nowrap"
-                >
-                  {isSavingProfile && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                  Simpan Perubahan
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

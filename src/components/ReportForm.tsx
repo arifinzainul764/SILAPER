@@ -1,15 +1,16 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  ExternalLink,
+  FileDown,
   FileText,
   ImagePlus,
   Loader2,
   Lock,
   RotateCcw,
-  Sparkles,
   Trash2,
   Unlock,
   UploadCloud,
@@ -20,38 +21,58 @@ import {
   extractKopLogoFromCanvas,
   preparePdfForExtraction,
 } from '../lib/pdfLogoScanner';
-import { SAMPLE_SPT_EXTRACTED } from '../lib/sampleData';
+import {
+  dataUrlToPdfBlob,
+  deleteSuratDasarPdf,
+  formatPdfFileSize,
+  getSuratDasarPdf,
+  readSmallPdfAsDataUrl,
+  saveSuratDasarPdf,
+} from '../lib/suratDasarStorage';
+import { parseDigitalSptTextLocally } from '../lib/localSptParser';
 import { REPORT_FIELD_LIMITS, ReportPhoto, TravelReportData } from '../types/report';
 import { OfficialEmblem } from './OfficialEmblem';
 
-export interface ExtractedSuratDasar {
-  dasarSurat?: string;
-  tujuan?: string;
-  maksudPerjalanan?: string;
-  tanggalBerangkat?: string;
-  tanggalKembali?: string;
+export interface SptAttachmentPayload {
+  sptPdfId: string;
+  sptPdfName: string;
+  sptPdfSize: number;
+  sptPdfDataUrl: string;
+}
+
+export interface SuratDasarAttachmentPayload {
+  suratDasarPdfId: string;
+  suratDasarPdfName: string;
+  suratDasarPdfSize: number;
+  suratDasarPdfDataUrl: string;
 }
 
 interface ReportFormProps {
   report: TravelReportData;
   isUnlocked: boolean;
   showRequiredErrors?: boolean;
+  currentOwnerId?: string;
+  canAccessAllFiles?: boolean;
   onToggleUnlock: () => void;
   onChangeField: <K extends keyof TravelReportData>(field: K, value: TravelReportData[K]) => void;
   onApplyExtractedSpt: (extracted: Partial<TravelReportData>, sourceFileName: string) => void;
-  onApplyExtractedDasar: (extracted: ExtractedSuratDasar, sourceFileName: string) => void;
-  onClearExtractedDasar?: (previousDasarEntry: string) => void;
+  onSaveSptPdf?: (attachment: SptAttachmentPayload) => void;
+  onSaveSuratDasarPdf: (attachment: SuratDasarAttachmentPayload) => void;
+  onClearSuratDasarPdf: () => void;
 }
 
 export const ReportForm: React.FC<ReportFormProps> = ({
   report,
   isUnlocked,
   showRequiredErrors = false,
+  currentOwnerId,
+  canAccessAllFiles = false,
   onToggleUnlock,
   onChangeField,
   onApplyExtractedSpt,
-  onApplyExtractedDasar,
-  onClearExtractedDasar,
+  onSaveSptPdf,
+  onSaveSuratDasarPdf,
+  onClearSuratDasarPdf,
 }) => {
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const dasarPdfInputRef = useRef<HTMLInputElement>(null);
@@ -60,19 +81,106 @@ export const ReportForm: React.FC<ReportFormProps> = ({
   const [isExtracting, setIsExtracting] = useState(false);
   const [uploadedPdfName, setUploadedPdfName] = useState<string>('');
   const [lastPdfFile, setLastPdfFile] = useState<File | null>(null);
+  const [sptPdfUrl, setSptPdfUrl] = useState<string>('');
   const [extractStatus, setExtractStatus] = useState<{
     type: 'success' | 'error' | 'info';
     message: string;
   } | null>(null);
 
-  const [isExtractingDasar, setIsExtractingDasar] = useState(false);
-  const [uploadedDasarPdfName, setUploadedDasarPdfName] = useState<string>('');
-  const [lastDasarPdfFile, setLastDasarPdfFile] = useState<File | null>(null);
-  const [lastExtractedDasarEntry, setLastExtractedDasarEntry] = useState<string>('');
-  const [dasarExtractStatus, setDasarExtractStatus] = useState<{
+  const [isSavingDasar, setIsSavingDasar] = useState(false);
+  const [dasarPdfUrl, setDasarPdfUrl] = useState<string>('');
+  const [dasarStatus, setDasarStatus] = useState<{
     type: 'success' | 'error' | 'info';
     message: string;
   } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl = '';
+
+    const resolveSptUrl = async () => {
+      if (!report.sptPdfId && !report.sptPdfDataUrl) {
+        if (active) setSptPdfUrl('');
+        return;
+      }
+
+      if (report.sptPdfId) {
+        const stored = await getSuratDasarPdf(
+          report.sptPdfId,
+          currentOwnerId,
+          canAccessAllFiles,
+        );
+        if (!active) return;
+        if (stored?.blob) {
+          objectUrl = URL.createObjectURL(stored.blob);
+          setSptPdfUrl(objectUrl);
+          return;
+        }
+      }
+
+      const fallbackBlob = dataUrlToPdfBlob(report.sptPdfDataUrl);
+      if (active && fallbackBlob) {
+        objectUrl = URL.createObjectURL(fallbackBlob);
+        setSptPdfUrl(objectUrl);
+        return;
+      }
+
+      if (active) setSptPdfUrl('');
+    };
+
+    void resolveSptUrl();
+
+    return () => {
+      active = false;
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [report.sptPdfId, report.sptPdfDataUrl, currentOwnerId, canAccessAllFiles]);
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl = '';
+
+    const resolveUrl = async () => {
+      if (!report.suratDasarPdfId && !report.suratDasarPdfDataUrl) {
+        if (active) setDasarPdfUrl('');
+        return;
+      }
+
+      if (report.suratDasarPdfId) {
+        const stored = await getSuratDasarPdf(
+          report.suratDasarPdfId,
+          currentOwnerId,
+          canAccessAllFiles,
+        );
+        if (!active) return;
+        if (stored?.blob) {
+          objectUrl = URL.createObjectURL(stored.blob);
+          setDasarPdfUrl(objectUrl);
+          return;
+        }
+      }
+
+      const fallbackBlob = dataUrlToPdfBlob(report.suratDasarPdfDataUrl);
+      if (active && fallbackBlob) {
+        objectUrl = URL.createObjectURL(fallbackBlob);
+        setDasarPdfUrl(objectUrl);
+        return;
+      }
+
+      if (active) setDasarPdfUrl('');
+    };
+
+    void resolveUrl();
+
+    return () => {
+      active = false;
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [report.suratDasarPdfId, report.suratDasarPdfDataUrl, currentOwnerId, canAccessAllFiles]);
 
   const [photoError, setPhotoError] = useState<string | null>(null);
   const [isProcessingPhoto, setIsProcessingPhoto] = useState(false);
@@ -104,8 +212,30 @@ export const ReportForm: React.FC<ReportFormProps> = ({
     setIsExtracting(true);
     setExtractStatus(null);
 
+    // Save uploaded SPT PDF (with stamped SPD) for operator verification even if AI extraction times out
+    try {
+      const previousSptId = report.sptPdfId;
+      const newSptId = `spt_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      await saveSuratDasarPdf(newSptId, file, file.name, currentOwnerId);
+      if (previousSptId && previousSptId !== newSptId) {
+        void deleteSuratDasarPdf(previousSptId, currentOwnerId, canAccessAllFiles);
+      }
+      const compactSptDataUrl = await readSmallPdfAsDataUrl(
+        file,
+        REPORT_FIELD_LIMITS.sptPdfDataUrl,
+      );
+      onSaveSptPdf?.({
+        sptPdfId: newSptId,
+        sptPdfName: file.name.slice(0, REPORT_FIELD_LIMITS.sptPdfName),
+        sptPdfSize: file.size,
+        sptPdfDataUrl: compactSptDataUrl,
+      });
+    } catch {
+      // Non-fatal: continue extraction even if local attachment cache fails
+    }
+
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 90000);
+    const timeoutId = window.setTimeout(() => controller.abort(), 120000);
 
     try {
       const prepared = await preparePdfForExtraction(file);
@@ -122,38 +252,102 @@ export const ReportForm: React.FC<ReportFormProps> = ({
           })
         : '';
 
-      const response = await fetch('/api/extract-spt', {
+      const requestBody = JSON.stringify({
+        fileName: file.name,
+        extractedText: prepared.extractedText,
+        kopImageBase64: prepared.kopImageBase64,
+        pageImagesBase64: prepared.pageImagesBase64,
+        ...(fallbackPdfBase64 ? { pdfBase64: fallbackPdfBase64 } : {}),
+      });
+
+      let response = await fetch('/api/extract-spt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
-        body: JSON.stringify({
-          fileName: file.name,
-          extractedText: prepared.extractedText,
-          kopImageBase64: prepared.kopImageBase64,
-          pageImagesBase64: prepared.pageImagesBase64,
-          ...(fallbackPdfBase64 ? { pdfBase64: fallbackPdfBase64 } : {}),
-        }),
+        body: requestBody,
       });
 
+      if ((response.status === 503 || response.status === 504) && !controller.signal.aborted) {
+        setExtractStatus({
+          type: 'info',
+          message: 'Server AI sedang mengalami lonjakan permintaan sementara. Mencoba ulang otomatis dalam beberapa detik...',
+        });
+        await new Promise((resolve) => window.setTimeout(resolve, 3500));
+        if (!controller.signal.aborted) {
+          response = await fetch('/api/extract-spt', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+            body: requestBody,
+          });
+        }
+      }
+
       const rawText = await response.text();
+      const contentType = (response.headers.get('content-type') || '').toLowerCase();
+      const isHtmlResponse =
+        contentType.includes('text/html') || /^\s*</.test(rawText);
+
       type ExtractedSptResponse = Partial<TravelReportData> & {
         hasKopLogo?: boolean;
         logoBox?: number[];
         kopBox?: number[];
       };
       let payload: { extracted?: ExtractedSptResponse; error?: string } = {};
-      try {
-        payload = rawText ? (JSON.parse(rawText) as typeof payload) : {};
-      } catch {
-        payload = {};
+      let jsonParseFailed = false;
+      if (!isHtmlResponse && rawText.trim()) {
+        try {
+          payload = JSON.parse(rawText) as typeof payload;
+        } catch {
+          jsonParseFailed = true;
+          payload = {};
+        }
+      }
+
+      const routeMissingOnStaticHost =
+        isHtmlResponse || response.status === 404 || response.status === 405;
+
+      if (routeMissingOnStaticHost) {
+        if (prepared.extractedText.trim().length >= 60) {
+          const localFields = parseDigitalSptTextLocally(prepared.extractedText);
+          let scannedLogoDataUrl = '';
+          let scannedKopBannerDataUrl = '';
+          try {
+            scannedLogoDataUrl = extractKopLogoFromCanvas(prepared.page1Canvas, {
+              logoBoxScope: prepared.logoBoxScope,
+            });
+          } catch {
+            scannedLogoDataUrl = '';
+          }
+          try {
+            scannedKopBannerDataUrl = extractKopBannerFromCanvas(prepared.page1Canvas, {
+              logoBoxScope: prepared.logoBoxScope,
+            });
+          } catch {
+            scannedKopBannerDataUrl = '';
+          }
+
+          onApplyExtractedSpt(
+            {
+              ...localFields,
+              logoDataUrl: scannedLogoDataUrl,
+              kopBannerDataUrl: scannedKopBannerDataUrl,
+            },
+            file.name,
+          );
+          setExtractStatus({
+            type: 'success',
+            message: `Data SPT dari "${file.name}" berhasil dibaca langsung dari teks PDF di browser (rute backend /api/extract-spt tidak aktif pada hosting ini). Mohon periksa kembali kelengkapan kolom melalui tombol "Ubah Data".`,
+          });
+          return;
+        }
+
+        throw new Error(
+          'Rute /api/extract-spt belum aktif pada hosting statis ini (server mengembalikan halaman HTML) dan PDF merupakan pindai gambar tanpa teks digital.',
+        );
       }
 
       if (!response.ok) {
-        if (response.status === 404) {
-          throw new Error(
-            'Endpoint /api/extract-spt tidak ditemukan di server (HTTP 404). Pastikan folder api/ dan vercel.json ikut ter-deploy.',
-          );
-        }
         if (response.status === 413) {
           throw new Error(
             'Ukuran file PDF melebihi batas upload server (HTTP 413, maks. ±3 MB pada hosting serverless). Silakan kompres PDF SPT terlebih dahulu.',
@@ -172,13 +366,21 @@ export const ReportForm: React.FC<ReportFormProps> = ({
           );
         }
         throw new Error(
-          payload?.error || `Gagal mengekstrak data dari file PDF SPT (HTTP ${response.status}).`,
+          payload?.error ||
+            `Gagal mengekstrak data dari file PDF SPT (HTTP ${response.status}).`,
         );
       }
 
-      if (!payload || typeof payload.extracted !== 'object' || payload.extracted === null) {
+      if (
+        jsonParseFailed ||
+        !payload ||
+        typeof payload.extracted !== 'object' ||
+        payload.extracted === null ||
+        Array.isArray(payload.extracted)
+      ) {
         throw new Error(
-          'Respons server bukan JSON yang valid (kemungkinan rute /api/extract-spt belum aktif di hosting).',
+          payload?.error ||
+            'Server mengembalikan format respons yang tidak sesuai JSON hasil ekstraksi.',
         );
       }
 
@@ -220,21 +422,21 @@ export const ReportForm: React.FC<ReportFormProps> = ({
       setExtractStatus({
         type: 'success',
         message: scannedKopBannerDataUrl
-          ? `Ekstraksi otomatis & scanning format Kop Surat asli dari "${file.name}" berhasil termasuk draf V. Hasil Pelaksanaan Kegiatan & VI. Kesimpulan dan Saran (maks. 1 baris A4). Kolom dikunci otomatis — klik "Ubah Data" untuk menyunting.`
+          ? `Ekstraksi otomatis & scanning format Kop Surat asli dari "${file.name}" berhasil termasuk draf V. Hasil Pelaksanaan Kegiatan & VI. Kesimpulan dan Saran (maks. 1 baris A4). Bagian 04 & 05 disembunyikan agar pratinjau lebih jelas — klik "Ubah Data" untuk melihat atau menyunting.`
           : scannedLogoDataUrl
-            ? `Ekstraksi otomatis & scanning logo instansi dari "${file.name}" berhasil termasuk draf V. Hasil Pelaksanaan Kegiatan & VI. Kesimpulan dan Saran (maks. 1 baris A4). Kolom dikunci otomatis — klik "Ubah Data" untuk menyunting.`
-            : `Ekstraksi otomatis dari "${file.name}" berhasil (menggunakan logo instansi default) termasuk draf V. Hasil Pelaksanaan Kegiatan & VI. Kesimpulan dan Saran (maks. 1 baris A4). Kolom dikunci otomatis — klik "Ubah Data" untuk menyunting.`,
+            ? `Ekstraksi otomatis & scanning logo instansi dari "${file.name}" berhasil termasuk draf V. Hasil Pelaksanaan Kegiatan & VI. Kesimpulan dan Saran (maks. 1 baris A4). Bagian 04 & 05 disembunyikan agar pratinjau lebih jelas — klik "Ubah Data" untuk melihat atau menyunting.`
+            : `Ekstraksi otomatis dari "${file.name}" berhasil (menggunakan logo instansi default) termasuk draf V. Hasil Pelaksanaan Kegiatan & VI. Kesimpulan dan Saran (maks. 1 baris A4). Bagian 04 & 05 disembunyikan agar pratinjau lebih jelas — klik "Ubah Data" untuk melihat atau menyunting.`,
       });
     } catch (err) {
       const isAbort = err instanceof DOMException && err.name === 'AbortError';
       const msg = isAbort
-        ? 'Waktu tunggu ekstraksi habis (melebihi 90 detik) karena koneksi atau server AI padat.'
+        ? 'Waktu tunggu ekstraksi habis karena koneksi atau server AI padat.'
         : err instanceof Error
           ? err.message
           : 'Gagal memproses file PDF.';
       setExtractStatus({
         type: 'error',
-        message: `${msg} Anda dapat menekan "Coba Lagi", menggunakan "Simulasi Ekstraksi SPT", atau klik "Ubah Data" untuk mengisi manual.`,
+        message: `${msg} Anda dapat menekan "Coba Lagi" atau klik "Ubah Data" untuk mengisi manual.`,
       });
     } finally {
       window.clearTimeout(timeoutId);
@@ -242,161 +444,67 @@ export const ReportForm: React.FC<ReportFormProps> = ({
     }
   };
 
-  const handleSimulatedExtraction = () => {
-    setIsExtracting(true);
-    setExtractStatus(null);
-    const demoFile = 'SPT_800.1.11.1_148_Kec_Cisarua_2026.pdf';
-    setUploadedPdfName(demoFile);
-
-    setTimeout(() => {
-      onApplyExtractedSpt(SAMPLE_SPT_EXTRACTED, demoFile);
-      setIsExtracting(false);
-      setExtractStatus({
-        type: 'success',
-        message: `Simulasi ekstraksi otomatis dari "${demoFile}" selesai termasuk draf V. Hasil Pelaksanaan Kegiatan & VI. Kesimpulan dan Saran (maks. 1 baris A4). Klik "Ubah Data" untuk menyunting.`,
-      });
-    }, 550);
-  };
-
   const handleDasarPdfFile = async (file: File) => {
     if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
-      setDasarExtractStatus({
+      setDasarStatus({
         type: 'error',
         message: 'Format file tidak valid. Harap unggah dokumen Surat Dasar berformat PDF (.pdf).',
       });
       return;
     }
 
-    if (file.size > 12 * 1024 * 1024) {
-      setDasarExtractStatus({
+    if (file.size > REPORT_FIELD_LIMITS.suratDasarPdfSize) {
+      setDasarStatus({
         type: 'error',
         message: 'Ukuran file PDF Surat Dasar maksimal 12 MB.',
       });
       return;
     }
 
-    setLastDasarPdfFile(file);
-    setUploadedDasarPdfName(file.name);
-    setIsExtractingDasar(true);
-    setDasarExtractStatus(null);
-
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 90000);
+    setIsSavingDasar(true);
+    setDasarStatus(null);
 
     try {
-      const prepared = await preparePdfForExtraction(file);
-      const hasPreparedPayload =
-        prepared.extractedText.trim().length >= 80 ||
-        prepared.pageImagesBase64.length > 0;
+      const previousId = report.suratDasarPdfId;
+      const newPdfId = `dasar_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
-      const fallbackPdfBase64 = !hasPreparedPayload
-        ? await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onerror = () => reject(new Error('Gagal membaca file PDF Surat Dasar.'));
-            reader.onload = () => resolve(String(reader.result || ''));
-            reader.readAsDataURL(file);
-          })
-        : '';
-
-      const response = await fetch('/api/extract-spt', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: controller.signal,
-        body: JSON.stringify({
-          documentType: 'dasar',
-          fileName: file.name,
-          extractedText: prepared.extractedText,
-          pageImagesBase64: prepared.pageImagesBase64,
-          ...(fallbackPdfBase64 ? { pdfBase64: fallbackPdfBase64 } : {}),
-        }),
-      });
-
-      const rawText = await response.text();
-      let payload: { extracted?: ExtractedSuratDasar; error?: string } = {};
-      try {
-        payload = rawText ? (JSON.parse(rawText) as typeof payload) : {};
-      } catch {
-        payload = {};
+      await saveSuratDasarPdf(newPdfId, file, file.name, currentOwnerId);
+      if (previousId && previousId !== newPdfId) {
+        void deleteSuratDasarPdf(previousId, currentOwnerId, canAccessAllFiles);
       }
 
-      if (!response.ok) {
-        if (response.status === 404) {
-          throw new Error(
-            'Endpoint /api/extract-spt tidak ditemukan di server (HTTP 404).',
-          );
-        }
-        if (response.status === 413) {
-          throw new Error(
-            'Ukuran file PDF melebihi batas upload server (HTTP 413). Silakan kompres PDF terlebih dahulu.',
-          );
-        }
-        if (response.status === 503) {
-          throw new Error(
-            payload?.error ||
-              'Server AI belum dikonfigurasi (GEMINI_API_KEY) atau sedang sibuk (503 UNAVAILABLE).',
-          );
-        }
-        if (response.status === 502 || response.status === 504) {
-          throw new Error(
-            payload?.error ||
-              `Server kehabisan waktu tunggu saat memproses PDF (HTTP ${response.status}). Silakan klik "Coba Lagi".`,
-          );
-        }
-        throw new Error(
-          payload?.error || `Gagal mengekstrak data dari PDF Surat Dasar (HTTP ${response.status}).`,
-        );
-      }
-
-      if (!payload || typeof payload.extracted !== 'object' || payload.extracted === null) {
-        throw new Error('Respons server untuk Surat Dasar bukan JSON yang valid.');
-      }
-
-      const extractedDasar = payload.extracted;
-      const resolvedCitation =
-        (extractedDasar.dasarSurat || '').trim() ||
-        `Surat Dasar (${file.name.replace(/\.pdf$/i, '')}).`;
-
-      if (lastExtractedDasarEntry && onClearExtractedDasar) {
-        onClearExtractedDasar(lastExtractedDasarEntry);
-      }
-      setLastExtractedDasarEntry(resolvedCitation);
-      onApplyExtractedDasar(
-        {
-          ...extractedDasar,
-          dasarSurat: resolvedCitation,
-        },
-        file.name,
+      const compactDataUrl = await readSmallPdfAsDataUrl(
+        file,
+        REPORT_FIELD_LIMITS.suratDasarPdfDataUrl,
       );
 
-      setDasarExtractStatus({
+      onSaveSuratDasarPdf({
+        suratDasarPdfId: newPdfId,
+        suratDasarPdfName: file.name.slice(0, REPORT_FIELD_LIMITS.suratDasarPdfName),
+        suratDasarPdfSize: file.size,
+        suratDasarPdfDataUrl: compactDataUrl,
+      });
+
+      setDasarStatus({
         type: 'success',
-        message: `Surat Dasar "${file.name}" berhasil dibaca dan ditambahkan ke bagian I. Pendahuluan / Dasar.`,
+        message: `File PDF "${file.name}" (${formatPdfFileSize(file.size)}) berhasil disimpan.`,
       });
     } catch (err) {
-      const isAbort = err instanceof DOMException && err.name === 'AbortError';
-      const msg = isAbort
-        ? 'Waktu tunggu ekstraksi Surat Dasar habis (melebihi 90 detik).'
-        : err instanceof Error
-          ? err.message
-          : 'Gagal memproses file PDF Surat Dasar.';
-      setDasarExtractStatus({
+      setDasarStatus({
         type: 'error',
-        message: `${msg} Anda dapat menekan "Coba Lagi" atau menambahkan dasar hukum secara manual pada kolom 04.`,
+        message: err instanceof Error ? err.message : 'Gagal menyimpan file PDF Surat Dasar.',
       });
     } finally {
-      window.clearTimeout(timeoutId);
-      setIsExtractingDasar(false);
+      setIsSavingDasar(false);
     }
   };
 
   const handleClearDasarPdf = () => {
-    if (lastExtractedDasarEntry && onClearExtractedDasar) {
-      onClearExtractedDasar(lastExtractedDasarEntry);
+    if (report.suratDasarPdfId) {
+      void deleteSuratDasarPdf(report.suratDasarPdfId, currentOwnerId, canAccessAllFiles);
     }
-    setUploadedDasarPdfName('');
-    setLastDasarPdfFile(null);
-    setLastExtractedDasarEntry('');
-    setDasarExtractStatus(null);
+    onClearSuratDasarPdf();
+    setDasarStatus(null);
     if (dasarPdfInputRef.current) {
       dasarPdfInputRef.current.value = '';
     }
@@ -481,17 +589,26 @@ export const ReportForm: React.FC<ReportFormProps> = ({
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 lg:space-y-5 min-w-0">
       {/* 01. Unggah PDF Surat Perintah Tugas (SPT) */}
-      <section className="bg-white border border-[#D8E0EB] rounded-lg p-5">
+      <section className="bg-white border border-[#D8E0EB] rounded-lg p-4 sm:p-5 min-w-0">
         <div className="flex items-start justify-between gap-4 mb-3">
-          <div>
-            <h2 className="text-base font-semibold text-[#0F172A]">
+          <div className="w-full min-w-0">
+            <h2 className="text-sm sm:text-base font-semibold text-[#0F172A]">
               01. Unggah PDF Surat Perintah Tugas (SPT)
             </h2>
-            <p className="text-xs text-[#475569] mt-0.5">
-              Sistem mengekstrak otomatis Nomor SPT, Dasar Hukum, Identitas Pegawai, Tujuan, dan Maksud Perjalanan.
-            </p>
+            <div className="mt-2 flex items-start gap-2 rounded border border-[#FDE68A] bg-[#FFFBEB] px-3 py-2 text-xs font-medium text-[#B45309] leading-relaxed">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span className="min-w-0 break-words">
+                Sistem memproses Laporan Perjalanan Dinas saat SPT diunggah.
+              </span>
+            </div>
+            <div className="mt-2 flex items-start gap-2 rounded border border-[#FDE68A] bg-[#FFFBEB] px-3 py-2 text-xs font-medium text-[#B45309] leading-relaxed">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span className="min-w-0 break-words">
+                Untuk ajukan SPD harap lampirkan SPD yang sudah berstempel pada file SPT untuk diverifikasi oleh operator
+              </span>
+            </div>
           </div>
         </div>
 
@@ -525,18 +642,20 @@ export const ReportForm: React.FC<ReportFormProps> = ({
               <UploadCloud className="w-7 h-7 text-[#0F2A56] mb-2" />
             )}
 
-            <p className="text-sm font-medium text-[#0F172A]">
+            <p className="text-sm font-medium text-[#0F172A] max-w-full break-words">
               {isExtracting
                 ? 'Sedang mengekstrak variabel SPT...'
-                : uploadedPdfName
-                  ? `File terpilih: ${uploadedPdfName}`
+                : report.sptPdfName || uploadedPdfName
+                  ? `File tersimpan: ${report.sptPdfName || uploadedPdfName}${
+                      report.sptPdfSize ? ` (${formatPdfFileSize(report.sptPdfSize)})` : ''
+                    }`
                   : 'Seret file PDF SPT ke sini atau pilih dokumen'}
             </p>
             <p className="text-xs text-[#64748B] mt-1">
               Format PDF resmi instansi · Ukuran maksimal 12 MB
             </p>
 
-            <div className="mt-3 flex flex-wrap items-center justify-center gap-2.5">
+            <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
               <button
                 type="button"
                 disabled={isExtracting}
@@ -544,17 +663,30 @@ export const ReportForm: React.FC<ReportFormProps> = ({
                 className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold text-white bg-[#0F2A56] rounded-md hover:bg-[#1E3A8A] disabled:opacity-60 transition-colors whitespace-nowrap shrink-0"
               >
                 <FileText className="w-3.5 h-3.5" />
-                Pilih File PDF SPT
+                {report.sptPdfName || uploadedPdfName ? 'Ganti File PDF SPT' : 'Pilih File PDF SPT'}
               </button>
-              <button
-                type="button"
-                disabled={isExtracting}
-                onClick={handleSimulatedExtraction}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[#0F2A56] bg-white border border-[#CBD5E1] rounded-md hover:bg-[#F1F5F9] disabled:opacity-60 transition-colors whitespace-nowrap shrink-0"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                Simulasi Ekstraksi SPT
-              </button>
+
+              {sptPdfUrl && !isExtracting && (
+                <>
+                  <a
+                    href={sptPdfUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-[#0F2A56] bg-white border border-[#CBD5E1] rounded-md hover:bg-[#EFF6FF] hover:border-[#BFDBFE] transition-colors whitespace-nowrap shrink-0"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    Lihat PDF
+                  </a>
+                  <a
+                    href={sptPdfUrl}
+                    download={report.sptPdfName || uploadedPdfName || 'spt-spd.pdf'}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-[#0F2A56] bg-white border border-[#CBD5E1] rounded-md hover:bg-[#EFF6FF] hover:border-[#BFDBFE] transition-colors whitespace-nowrap shrink-0"
+                  >
+                    <FileDown className="w-3.5 h-3.5" />
+                    Unduh
+                  </a>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -575,8 +707,8 @@ export const ReportForm: React.FC<ReportFormProps> = ({
             ) : (
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             )}
-            <div className="flex-1 space-y-2">
-              <span className="block">{extractStatus.message}</span>
+            <div className="flex-1 min-w-0 space-y-2">
+              <span className="block break-words leading-relaxed">{extractStatus.message}</span>
               {extractStatus.type === 'error' && lastPdfFile && (
                 <button
                   type="button"
@@ -592,20 +724,15 @@ export const ReportForm: React.FC<ReportFormProps> = ({
         )}
       </section>
 
-      {/* 02. Unggah PDF Surat Dasar */}
-      <section className="bg-white border border-[#D8E0EB] rounded-lg p-5">
-        <div className="flex items-start justify-between gap-4 mb-3">
-          <div>
-            <h2 className="text-base font-semibold text-[#0F172A]">
-              02. Unggah PDF Surat Dasar
-            </h2>
-            <p className="text-xs text-[#475569] mt-0.5">
-              Unggah surat undangan, nota dinas, atau surat referensi dasar tugas (.pdf) untuk ditambahkan ke bagian I. Pendahuluan / Dasar.
-            </p>
-          </div>
-          <span className="text-[11px] font-medium text-[#64748B] whitespace-nowrap shrink-0">
-            Opsional
-          </span>
+      {/* 02. Unggah Surat Dasar */}
+      <section className="bg-white border border-[#D8E0EB] rounded-lg p-4 sm:p-5 min-w-0">
+        <div className="mb-3">
+          <h2 className="text-sm sm:text-base font-semibold text-[#0F172A]">
+            02. Unggah Surat Dasar
+          </h2>
+          <p className="text-xs text-[#475569] mt-0.5 leading-relaxed">
+            Opsional · File PDF Surat Dasar langsung disimpan tanpa proses scanning.
+          </p>
         </div>
 
         <div
@@ -615,7 +742,7 @@ export const ReportForm: React.FC<ReportFormProps> = ({
           onDrop={(e) => {
             e.preventDefault();
             const file = e.dataTransfer.files?.[0];
-            if (file) handleDasarPdfFile(file);
+            if (file) void handleDasarPdfFile(file);
           }}
           className="border border-dashed border-[#94A3B8] bg-[#F8FAFC] rounded-md p-4 text-center transition-colors hover:border-[#0F2A56]"
         >
@@ -626,82 +753,105 @@ export const ReportForm: React.FC<ReportFormProps> = ({
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0];
-              if (file) handleDasarPdfFile(file);
+              if (file) void handleDasarPdfFile(file);
               e.target.value = '';
             }}
           />
 
           <div className="flex flex-col items-center">
-            {isExtractingDasar ? (
+            {isSavingDasar ? (
               <Loader2 className="w-7 h-7 text-[#0F2A56] animate-spin mb-2" />
             ) : (
               <UploadCloud className="w-7 h-7 text-[#0F2A56] mb-2" />
             )}
 
-            <p className="text-sm font-medium text-[#0F172A]">
-              {isExtractingDasar
-                ? 'Sedang membaca dokumen Surat Dasar...'
-                : uploadedDasarPdfName
-                  ? `File terpilih: ${uploadedDasarPdfName}`
+            <p className="text-sm font-medium text-[#0F172A] max-w-full break-words">
+              {isSavingDasar
+                ? 'Menyimpan file PDF Surat Dasar...'
+                : report.suratDasarPdfName
+                  ? `File tersimpan: ${report.suratDasarPdfName}${
+                      report.suratDasarPdfSize
+                        ? ` (${formatPdfFileSize(report.suratDasarPdfSize)})`
+                        : ''
+                    }`
                   : 'Seret file PDF Surat Dasar ke sini atau pilih dokumen'}
             </p>
             <p className="text-xs text-[#64748B] mt-1">
               Format PDF resmi (.pdf) · Ukuran maksimal 12 MB
             </p>
 
-            <div className="mt-3 flex flex-wrap items-center justify-center gap-2.5">
+            <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
               <button
                 type="button"
-                disabled={isExtractingDasar}
+                disabled={isSavingDasar}
                 onClick={() => dasarPdfInputRef.current?.click()}
                 className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold text-white bg-[#0F2A56] rounded-md hover:bg-[#1E3A8A] disabled:opacity-60 transition-colors whitespace-nowrap shrink-0"
               >
                 <FileText className="w-3.5 h-3.5" />
-                {uploadedDasarPdfName ? 'Ganti File PDF Surat Dasar' : 'Pilih File PDF Surat Dasar'}
+                {report.suratDasarPdfName ? 'Ganti File PDF Surat Dasar' : 'Pilih File PDF Surat Dasar'}
               </button>
-              {uploadedDasarPdfName && !isExtractingDasar && (
+
+              {dasarPdfUrl && !isSavingDasar && (
+                <>
+                  <a
+                    href={dasarPdfUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-[#0F2A56] bg-white border border-[#CBD5E1] rounded-md hover:bg-[#EFF6FF] hover:border-[#BFDBFE] transition-colors whitespace-nowrap shrink-0"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    Lihat PDF
+                  </a>
+                  <a
+                    href={dasarPdfUrl}
+                    download={report.suratDasarPdfName || 'surat-dasar.pdf'}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-[#0F2A56] bg-white border border-[#CBD5E1] rounded-md hover:bg-[#EFF6FF] hover:border-[#BFDBFE] transition-colors whitespace-nowrap shrink-0"
+                  >
+                    <FileDown className="w-3.5 h-3.5" />
+                    Unduh
+                  </a>
+                </>
+              )}
+
+              {report.suratDasarPdfName && !isSavingDasar && (
                 <button
                   type="button"
                   onClick={handleClearDasarPdf}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[#DC2626] bg-white border border-[#FECACA] rounded-md hover:bg-[#FEF2F2] transition-colors whitespace-nowrap shrink-0"
+                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-[#DC2626] bg-white border border-[#FECACA] rounded-md hover:bg-[#FEF2F2] transition-colors whitespace-nowrap shrink-0"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   Hapus File
                 </button>
               )}
             </div>
+
+            {report.suratDasarPdfName && !dasarPdfUrl && !isSavingDasar && (
+              <p className="text-[11px] text-[#64748B] mt-2.5 max-w-md leading-relaxed">
+                Nama file tersimpan pada arsip laporan. Unggah ulang file jika Anda membuka laporan dari perangkat berbeda dan memerlukan unduhan PDF berukuran besar.
+              </p>
+            )}
           </div>
         </div>
 
-        {dasarExtractStatus && (
+        {dasarStatus && (
           <div
             role="status"
             className={`mt-3 flex items-start gap-2 rounded-md border px-3 py-2.5 text-xs ${
-              dasarExtractStatus.type === 'success'
+              dasarStatus.type === 'success'
                 ? 'border-[#BBF7D0] bg-[#F0FDF4] text-[#166534]'
-                : dasarExtractStatus.type === 'error'
+                : dasarStatus.type === 'error'
                   ? 'border-[#FECACA] bg-[#FEF2F2] text-[#991B1B]'
                   : 'border-[#CBD5E1] bg-[#F8FAFC] text-[#334155]'
             }`}
           >
-            {dasarExtractStatus.type === 'success' ? (
+            {dasarStatus.type === 'success' ? (
               <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
             ) : (
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             )}
-            <div className="flex-1 space-y-2">
-              <span className="block">{dasarExtractStatus.message}</span>
-              {dasarExtractStatus.type === 'error' && lastDasarPdfFile && (
-                <button
-                  type="button"
-                  disabled={isExtractingDasar}
-                  onClick={() => handleDasarPdfFile(lastDasarPdfFile)}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold text-[#991B1B] bg-white border border-[#FCA5A5] rounded hover:bg-[#FEE2E2] disabled:opacity-50 transition-colors"
-                >
-                  Coba Lagi
-                </button>
-              )}
-            </div>
+            <span className="flex-1 min-w-0 break-words leading-relaxed">
+              {dasarStatus.message}
+            </span>
           </div>
         )}
       </section>
@@ -709,19 +859,19 @@ export const ReportForm: React.FC<ReportFormProps> = ({
       {/* 03. Unggah Foto Dokumentasi (Maksimal 4 Foto) */}
       <section
         id="section-foto-dokumentasi"
-        className={`bg-white border rounded-lg p-5 transition-colors ${
+        className={`bg-white border rounded-lg p-4 sm:p-5 min-w-0 transition-colors ${
           showRequiredErrors && report.photos.length === 0
             ? 'border-[#DC2626]'
             : 'border-[#D8E0EB]'
         }`}
       >
-        <div className="flex items-start justify-between gap-4 mb-3">
-          <div>
-            <h2 className="text-base font-semibold text-[#0F172A]">
+        <div className="flex items-start justify-between gap-3 mb-3">
+          <div className="min-w-0 flex-1">
+            <h2 className="text-sm sm:text-base font-semibold text-[#0F172A]">
               03. Foto Dokumentasi Kegiatan
               <span className="text-[#DC2626] font-bold ml-1" aria-hidden="true">*</span>
             </h2>
-            <p className="text-xs text-[#475569] mt-0.5">
+            <p className="text-xs text-[#475569] mt-0.5 leading-relaxed">
               Format JPG atau PNG · Minimal 1 dan maksimal 4 foto untuk galeri Lampiran A4.
             </p>
           </div>
@@ -786,7 +936,7 @@ export const ReportForm: React.FC<ReportFormProps> = ({
         )}
 
         {report.photos.length > 0 && (
-          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-3">
             {report.photos.map((photo, index) => (
               <div
                 key={photo.id}
@@ -828,44 +978,70 @@ export const ReportForm: React.FC<ReportFormProps> = ({
         )}
       </section>
 
+      {!isUnlocked ? (
+        <section
+          className={`bg-white border rounded-lg px-4 sm:px-5 py-3.5 min-w-0 transition-colors ${
+            showRequiredErrors &&
+            (!report.hasilPelaksanaan.trim() || !report.kesimpulanSaran.trim())
+              ? 'border-[#DC2626]'
+              : 'border-[#D8E0EB]'
+          }`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-semibold text-[#0F172A]">
+                04 &amp; 05. Data SPT, Pelaksana, &amp; Uraian Hasil
+              </p>
+              <p
+                className={`text-[11px] mt-0.5 ${
+                  showRequiredErrors &&
+                  (!report.hasilPelaksanaan.trim() || !report.kesimpulanSaran.trim())
+                    ? 'text-[#DC2626] font-medium'
+                    : 'text-[#64748B]'
+                }`}
+              >
+                {showRequiredErrors &&
+                (!report.hasilPelaksanaan.trim() || !report.kesimpulanSaran.trim())
+                  ? 'Kolom V. Hasil Pelaksanaan Kegiatan dan VI. Kesimpulan dan Saran wajib diisi. Klik "Ubah Data" untuk melengkapi.'
+                  : 'Disembunyikan agar Live Preview A4 lebih mudah terlihat. Klik "Ubah Data" untuk membuka dan menyunting.'}
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={onToggleUnlock}
+              className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-md bg-[#EFF6FF] text-[#0F2A56] border border-[#BFDBFE] hover:bg-[#DBEAFE] transition-colors whitespace-nowrap shrink-0"
+            >
+              <Unlock className="w-3.5 h-3.5" />
+              Ubah Data
+            </button>
+          </div>
+        </section>
+      ) : (
+        <>
       {/* 04. Variabel Ekstraksi SPT & Status Kunci */}
-      <section className="bg-white border border-[#D8E0EB] rounded-lg p-5">
+      <section className="bg-white border border-[#D8E0EB] rounded-lg p-4 sm:p-5 min-w-0">
         <div className="flex flex-wrap items-center justify-between gap-3 pb-3 mb-4 border-b border-[#E2E8F0]">
-          <div>
-            <h2 className="text-base font-semibold text-[#0F172A]">
-              04. Data Surat Perintah Tugas & Pelaksana
+          <div className="min-w-0 flex-1">
+            <h2 className="text-sm sm:text-base font-semibold text-[#0F172A]">
+              04. Data Surat Perintah Tugas &amp; Pelaksana
             </h2>
             <p className="text-xs text-[#475569] mt-0.5">
-              {isUnlocked
-                ? 'Mode penyuntingan aktif · Seluruh kolom terbuka untuk penyesuaian manual.'
-                : 'Mode terkunci (Read-Only) · Mencegah perubahan atau penghapusan data tidak sengaja.'}
+              Mode penyuntingan aktif · Seluruh kolom terbuka untuk penyesuaian manual.
             </p>
           </div>
 
           <button
             type="button"
             onClick={onToggleUnlock}
-            className={`inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 ${
-              isUnlocked
-                ? 'bg-[#0F2A56] text-white hover:bg-[#1E3A8A]'
-                : 'bg-[#EFF6FF] text-[#0F2A56] border border-[#BFDBFE] hover:bg-[#DBEAFE]'
-            }`}
+            className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-md bg-[#0F2A56] text-white hover:bg-[#1E3A8A] transition-colors whitespace-nowrap shrink-0"
           >
-            {isUnlocked ? (
-              <>
-                <Lock className="w-3.5 h-3.5" />
-                Kunci Data
-              </>
-            ) : (
-              <>
-                <Unlock className="w-3.5 h-3.5" />
-                Ubah Data
-              </>
-            )}
+            <Lock className="w-3.5 h-3.5" />
+            Sembunyikan &amp; Kunci
           </button>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-3.5">
           <div>
             <label htmlFor="nomorSpt" className="block text-xs font-medium text-[#334155] mb-1">
               Nomor SPT
@@ -898,7 +1074,7 @@ export const ReportForm: React.FC<ReportFormProps> = ({
             />
           </div>
 
-          <div className="sm:col-span-2">
+          <div className="sm:col-span-2 lg:col-span-1 xl:col-span-2">
             <label htmlFor="dasarHukum" className="block text-xs font-medium text-[#334155] mb-1">
               Dasar Hukum
             </label>
@@ -978,7 +1154,7 @@ export const ReportForm: React.FC<ReportFormProps> = ({
             />
           </div>
 
-          <div className="sm:col-span-2">
+          <div className="sm:col-span-2 lg:col-span-1 xl:col-span-2">
             <label htmlFor="tujuan" className="block text-xs font-medium text-[#334155] mb-1">
               Tujuan Perjalanan Dinas
             </label>
@@ -994,7 +1170,7 @@ export const ReportForm: React.FC<ReportFormProps> = ({
             />
           </div>
 
-          <div className="sm:col-span-2">
+          <div className="sm:col-span-2 lg:col-span-1 xl:col-span-2">
             <label htmlFor="maksudPerjalanan" className="block text-xs font-medium text-[#334155] mb-1">
               Maksud Perjalanan
             </label>
@@ -1059,11 +1235,11 @@ export const ReportForm: React.FC<ReportFormProps> = ({
           </button>
 
           {showInstansiSection && (
-            <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+            <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-3.5">
               {report.kopBannerDataUrl ? (
-                <div className="sm:col-span-2 rounded-md border border-[#BFDBFE] bg-[#EFF6FF]/60 p-3 space-y-2.5">
+                <div className="sm:col-span-2 lg:col-span-1 xl:col-span-2 rounded-md border border-[#BFDBFE] bg-[#EFF6FF]/60 p-3 space-y-2.5">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
+                    <div className="min-w-0 flex-1">
                       <p className="text-xs font-semibold text-[#0F172A]">
                         Format Kop Surat Resmi (Hasil Scan SPT.PDF)
                       </p>
@@ -1089,7 +1265,7 @@ export const ReportForm: React.FC<ReportFormProps> = ({
                   </div>
                 </div>
               ) : (
-                <div className="sm:col-span-2 flex items-center justify-between gap-3 rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5">
+                <div className="sm:col-span-2 lg:col-span-1 xl:col-span-2 flex flex-wrap items-center justify-between gap-3 rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5">
                   <div className="flex items-center gap-3 min-w-0">
                     <div className="w-11 h-11 rounded border border-[#CBD5E1] bg-white flex items-center justify-center shrink-0 overflow-hidden p-1">
                       {report.logoDataUrl ? (
@@ -1156,7 +1332,7 @@ export const ReportForm: React.FC<ReportFormProps> = ({
                 />
               </div>
 
-              <div className="sm:col-span-2">
+              <div className="sm:col-span-2 lg:col-span-1 xl:col-span-2">
                 <label htmlFor="alamatKecamatan" className="block text-xs font-medium text-[#334155] mb-1">
                   Alamat & Kontak Kantor Kecamatan
                 </label>
@@ -1207,11 +1383,11 @@ export const ReportForm: React.FC<ReportFormProps> = ({
       </section>
 
       {/* 05. Isi Laporan Pelaksanaan (Romawi V - VII) */}
-      <section className="bg-white border border-[#D8E0EB] rounded-lg p-5">
+      <section className="bg-white border border-[#D8E0EB] rounded-lg p-4 sm:p-5 min-w-0">
         <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
-          <div>
-            <h2 className="text-base font-semibold text-[#0F172A]">
-              05. Uraian Hasil & Penutup (Romawi V – VII)
+          <div className="min-w-0 flex-1">
+            <h2 className="text-sm sm:text-base font-semibold text-[#0F172A]">
+              05. Uraian Hasil &amp; Penutup (Romawi V – VII)
             </h2>
             <p className="text-xs text-[#475569] mt-0.5">
               {isUnlocked
@@ -1297,6 +1473,8 @@ export const ReportForm: React.FC<ReportFormProps> = ({
           </div>
         </div>
       </section>
+        </>
+      )}
 
     </div>
   );

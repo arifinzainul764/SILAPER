@@ -90,7 +90,7 @@ export const A4Preview: React.FC<A4PreviewProps> = ({ report }) => {
   return (
     <div id="a4-print-area" className="print-only-container flex flex-col items-center gap-8">
       {/* Halaman 1: Kop Surat & Batang Tubuh I - VII */}
-      <article className="a4-sheet font-official-doc text-[11pt] text-[#0F172A]">
+      <article className="a4-sheet font-official-doc text-[11pt] text-[#0F172A] break-words overflow-hidden">
         {/* Kop Surat Resmi */}
         {hasValidKopBanner ? (
           <header className="mb-5">
@@ -294,7 +294,7 @@ export const A4Preview: React.FC<A4PreviewProps> = ({ report }) => {
       </article>
 
       {/* Halaman 2: Lampiran Dokumentasi Kegiatan (Maksimal 4 Foto) */}
-      <article className="a4-sheet font-official-doc text-[11pt] text-[#0F172A] print-page-break">
+      <article className="a4-sheet font-official-doc text-[11pt] text-[#0F172A] break-words overflow-hidden print-page-break">
         <div className="text-center mb-6 pb-3 border-b border-slate-300">
           <h2 className="text-[12pt] font-bold uppercase underline underline-offset-4 tracking-wide">
             LAMPIRAN DOKUMENTASI KEGIATAN

@@ -175,7 +175,7 @@
         "status": {
           "type": "string",
           "description": "Lifecycle status of the travel report",
-          "enum": ["draft", "final"]
+          "enum": ["diajukan", "diterima", "ditolak"]
         },
         "photos": {
           "type": "array",
@@ -190,6 +190,51 @@
           "type": "string",
           "description": "Optional compressed data URL of the full Kop Surat banner scanned from uploaded SPT PDF",
           "maxLength": 220000
+        },
+        "sptPdfId": {
+          "type": "string",
+          "description": "Optional identifier linking the uploaded SPT & stamped SPD PDF attachment",
+          "maxLength": 80,
+          "pattern": "^[a-zA-Z0-9_\\-]*$"
+        },
+        "sptPdfName": {
+          "type": "string",
+          "description": "Optional original filename of the uploaded SPT PDF",
+          "maxLength": 200
+        },
+        "sptPdfSize": {
+          "type": "number",
+          "description": "Optional byte size of the uploaded SPT PDF"
+        },
+        "sptPdfDataUrl": {
+          "type": "string",
+          "description": "Optional compact PDF data URL for small SPT & stamped SPD attachments",
+          "maxLength": 180000
+        },
+        "suratDasarPdfId": {
+          "type": "string",
+          "description": "Optional identifier linking the locally stored Surat Dasar PDF attachment",
+          "maxLength": 80,
+          "pattern": "^[a-zA-Z0-9_\\-]*$"
+        },
+        "suratDasarPdfName": {
+          "type": "string",
+          "description": "Optional original filename of the uploaded Surat Dasar PDF",
+          "maxLength": 200
+        },
+        "suratDasarPdfSize": {
+          "type": "number",
+          "description": "Optional byte size of the uploaded Surat Dasar PDF"
+        },
+        "suratDasarPdfDataUrl": {
+          "type": "string",
+          "description": "Optional compact PDF data URL for small Surat Dasar attachments",
+          "maxLength": 200000
+        },
+        "catatanVerifikasi": {
+          "type": "string",
+          "description": "Optional operator verification note on submission status",
+          "maxLength": 500
         },
         "createdAt": {
           "type": "string",

@@ -5,7 +5,13 @@ export interface ReportPhoto {
   dataUrl: string;
 }
 
-export type ReportStatus = 'draft' | 'final';
+export type ReportStatus = 'diajukan' | 'diterima' | 'ditolak';
+
+export function normalizeReportStatus(status: unknown): ReportStatus {
+  if (status === 'diterima' || status === 'final') return 'diterima';
+  if (status === 'ditolak') return 'ditolak';
+  return 'diajukan';
+}
 
 export interface TravelReportData {
   namaKabupaten: string;
@@ -34,6 +40,15 @@ export interface TravelReportData {
   photos: ReportPhoto[];
   logoDataUrl?: string;
   kopBannerDataUrl?: string;
+  sptPdfId?: string;
+  sptPdfName?: string;
+  sptPdfSize?: number;
+  sptPdfDataUrl?: string;
+  suratDasarPdfId?: string;
+  suratDasarPdfName?: string;
+  suratDasarPdfSize?: number;
+  suratDasarPdfDataUrl?: string;
+  catatanVerifikasi?: string;
 }
 
 export interface StoredTravelReport extends TravelReportData {
@@ -73,6 +88,15 @@ export const REPORT_FIELD_LIMITS = {
   photoDataUrl: 220000,
   logoDataUrl: 220000,
   kopBannerDataUrl: 220000,
+  sptPdfId: 80,
+  sptPdfName: 200,
+  sptPdfSize: 12582912,
+  sptPdfDataUrl: 180000,
+  suratDasarPdfId: 80,
+  suratDasarPdfName: 200,
+  suratDasarPdfSize: 12582912,
+  suratDasarPdfDataUrl: 200000,
+  catatanVerifikasi: 500,
   maxPhotos: 4,
 } as const;
 
@@ -101,10 +125,19 @@ export function createEmptyReport(): TravelReportData {
     namaCamat: 'H. Dedi Kurniawan, S.STP., M.Si.',
     nipCamat: '19750412 199511 1 001',
     pangkatCamat: 'Pembina Tk. I (IV/b)',
-    status: 'draft',
+    status: 'diajukan',
     photos: [],
     logoDataUrl: '',
     kopBannerDataUrl: '',
+    sptPdfId: '',
+    sptPdfName: '',
+    sptPdfSize: 0,
+    sptPdfDataUrl: '',
+    suratDasarPdfId: '',
+    suratDasarPdfName: '',
+    suratDasarPdfSize: 0,
+    suratDasarPdfDataUrl: '',
+    catatanVerifikasi: '',
   };
 }
 
@@ -114,7 +147,31 @@ export function sanitizeReportForFirestore(
 ): TravelReportData & { ownerId: string } {
   const clamp = (val: string, max: number) => (val || '').trim().slice(0, max);
 
-  return {
+  const rawSptSize = Number(report.sptPdfSize);
+  const safeSptSize =
+    Number.isFinite(rawSptSize) && rawSptSize > 0
+      ? Math.min(Math.round(rawSptSize), REPORT_FIELD_LIMITS.sptPdfSize)
+      : 0;
+  const rawSptDataUrl = report.sptPdfDataUrl || '';
+  const safeSptDataUrl =
+    rawSptDataUrl.startsWith('data:application/pdf') &&
+    rawSptDataUrl.length <= REPORT_FIELD_LIMITS.sptPdfDataUrl
+      ? rawSptDataUrl
+      : '';
+
+  const rawPdfSize = Number(report.suratDasarPdfSize);
+  const safePdfSize =
+    Number.isFinite(rawPdfSize) && rawPdfSize > 0
+      ? Math.min(Math.round(rawPdfSize), REPORT_FIELD_LIMITS.suratDasarPdfSize)
+      : 0;
+  const rawPdfDataUrl = report.suratDasarPdfDataUrl || '';
+  const safePdfDataUrl =
+    rawPdfDataUrl.startsWith('data:application/pdf') &&
+    rawPdfDataUrl.length <= REPORT_FIELD_LIMITS.suratDasarPdfDataUrl
+      ? rawPdfDataUrl
+      : '';
+
+  const payload: TravelReportData & { ownerId: string } = {
     ownerId,
     namaKabupaten: clamp(report.namaKabupaten, REPORT_FIELD_LIMITS.namaKabupaten),
     namaKecamatan: clamp(report.namaKecamatan, REPORT_FIELD_LIMITS.namaKecamatan),
@@ -138,7 +195,7 @@ export function sanitizeReportForFirestore(
     namaCamat: clamp(report.namaCamat, REPORT_FIELD_LIMITS.namaCamat),
     nipCamat: clamp(report.nipCamat, REPORT_FIELD_LIMITS.nipCamat),
     pangkatCamat: clamp(report.pangkatCamat, REPORT_FIELD_LIMITS.pangkatCamat),
-    status: report.status === 'final' ? 'final' : 'draft',
+    status: normalizeReportStatus(report.status),
     photos: (report.photos || []).slice(0, REPORT_FIELD_LIMITS.maxPhotos).map((p, idx) => ({
       id: clamp(p.id || `foto-${idx + 1}`, REPORT_FIELD_LIMITS.photoId).replace(/[^a-zA-Z0-9_\-]/g, '_'),
       name: clamp(p.name || `dokumentasi_${idx + 1}.jpg`, REPORT_FIELD_LIMITS.photoName),
@@ -147,7 +204,34 @@ export function sanitizeReportForFirestore(
     })),
     logoDataUrl: (report.logoDataUrl || '').slice(0, REPORT_FIELD_LIMITS.logoDataUrl),
     kopBannerDataUrl: (report.kopBannerDataUrl || '').slice(0, REPORT_FIELD_LIMITS.kopBannerDataUrl),
+    sptPdfId: clamp(report.sptPdfId || '', REPORT_FIELD_LIMITS.sptPdfId).replace(
+      /[^a-zA-Z0-9_\-]/g,
+      '_',
+    ),
+    sptPdfName: clamp(report.sptPdfName || '', REPORT_FIELD_LIMITS.sptPdfName),
+    sptPdfSize: safeSptSize,
+    sptPdfDataUrl: safeSptDataUrl,
+    suratDasarPdfId: clamp(report.suratDasarPdfId || '', REPORT_FIELD_LIMITS.suratDasarPdfId).replace(
+      /[^a-zA-Z0-9_\-]/g,
+      '_',
+    ),
+    suratDasarPdfName: clamp(report.suratDasarPdfName || '', REPORT_FIELD_LIMITS.suratDasarPdfName),
+    suratDasarPdfSize: safePdfSize,
+    suratDasarPdfDataUrl: safePdfDataUrl,
+    catatanVerifikasi: clamp(
+      report.catatanVerifikasi || '',
+      REPORT_FIELD_LIMITS.catatanVerifikasi,
+    ),
   };
+
+  if (payload.suratDasarPdfDataUrl && JSON.stringify(payload).length > 880000) {
+    payload.suratDasarPdfDataUrl = '';
+  }
+  if (payload.sptPdfDataUrl && JSON.stringify(payload).length > 880000) {
+    payload.sptPdfDataUrl = '';
+  }
+
+  return payload;
 }
 
 export const ADMIN_EMAIL = 'arifinzainul764@gmail.com';
@@ -162,6 +246,8 @@ export const STAFF_FIELD_LIMITS = {
   passwordMax: 128,
 } as const;
 
+export type UserRole = 'admin' | 'operator' | 'user';
+
 export interface AuthorizedStaff {
   id: string;
   nip: string;
@@ -173,6 +259,7 @@ export interface AuthorizedStaff {
   email: string;
   active: boolean;
   addedBy: string;
+  role?: 'user';
   createdAt?: unknown;
   updatedAt?: unknown;
 }

@@ -36,6 +36,7 @@ interface StaffAdminPanelProps {
   staffList: AuthorizedStaff[];
   loadingStaff: boolean;
   adminEmail: string;
+  managerLabel?: string;
   onAddStaff: (input: {
     nip: string;
     displayName: string;
@@ -52,6 +53,7 @@ export const StaffAdminPanel: React.FC<StaffAdminPanelProps> = ({
   staffList,
   loadingStaff,
   adminEmail,
+  managerLabel,
   onAddStaff,
   onEditStaff,
   onToggleStaffActive,
@@ -281,12 +283,12 @@ export const StaffAdminPanel: React.FC<StaffAdminPanelProps> = ({
               Kelola Akun Staf Kecamatan Tarik
             </h2>
             <p className="text-xs text-[#475569] mt-1">
-              Daftarkan akun pegawai menggunakan NIP, Nama Lengkap, Jabatan, dan Password wajib. Email bersifat opsional.
+              Daftarkan akun pegawai menggunakan NIP, Nama Lengkap, Jabatan, dan Password wajib. Semua akun yang terdaftar pada tabel merupakan akun <strong className="text-[#0F172A]">User</strong> (berwenang mengakses Beranda, Buat Laporan/Ajukan SPD Baru, mengelola akunnya sendiri, serta terisolasi dari berkas User lain).
             </p>
           </div>
           <div className="text-xs text-[#0F2A56] font-medium inline-flex items-center gap-1.5">
             <ShieldCheck className="w-4 h-4 shrink-0" />
-            <span>Admin: {adminEmail}</span>
+            <span>{managerLabel || `Admin: ${adminEmail}`}</span>
           </div>
         </div>
 
@@ -584,6 +586,7 @@ export const StaffAdminPanel: React.FC<StaffAdminPanelProps> = ({
                       {renderSortIcon('email')}
                     </button>
                   </th>
+                  <th className="py-3 px-4">Peran</th>
                   <th className="py-3 px-4">
                     <button
                       type="button"
@@ -611,6 +614,11 @@ export const StaffAdminPanel: React.FC<StaffAdminPanelProps> = ({
                     </td>
                     <td className="py-3 px-4 font-mono-tabular text-[#475569]">
                       {staff.email || '—'}
+                    </td>
+                    <td className="py-3 px-4">
+                      <span className="inline-flex items-center px-2 py-0.5 rounded border border-[#BFDBFE] bg-[#EFF6FF] text-[11px] font-semibold text-[#0F2A56]">
+                        User
+                      </span>
                     </td>
                     <td className="py-3 px-4">
                       <span

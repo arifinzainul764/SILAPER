@@ -4,8 +4,8 @@
 1. **Strict Ownership Isolation**: A `UserProfile` (`/users/{userId}`) and all nested `TravelReport` documents (`/users/{userId}/reports/{reportId}`) belong exclusively to the verified user whose `request.auth.uid == userId`.
 2. **Parent Existence (Master Gate)**: A `TravelReport` cannot be created or updated unless its parent `/users/{userId}` document exists.
 3. **Immutable Ownership & Creation Time**: `ownerId` and `createdAt` can never change after creation, and `createdAt` / `updatedAt` must equal `request.time`.
-4. **Strict Photo Array Bounds**: `photos` is strictly bounded to at most 4 items (`size() <= 4`), with validated map keys and size limits.
-5. **Terminal State Locking**: When a `TravelReport` has `status == 'final'`, content fields cannot be edited unless the owner explicitly transitions `status` back to `'draft'`.
+4. **Strict Photo & Attachment Bounds**: `photos` is strictly bounded to at most 4 items (`size() <= 4`), with validated map keys and size limits; optional SPT & Surat Dasar PDF attachment metadata (`sptPdf*`, `suratDasarPdf*`) and verification notes (`catatanVerifikasi`) enforce strict regex, type, byte-size (`<= 12 MB`), and length bounds.
+5. **Terminal State Locking**: When a `TravelReport` has `status == 'diterima'`, content fields cannot be edited unless an admin performs the update or the owner explicitly transitions `status` back to `'diajukan'` or `'ditolak'`.
 6. **Verified Email Requirement**: All reads and writes require `request.auth != null && request.auth.token.email_verified == true`.
 7. **Admin-Only Staff Registry**: Only the verified Admin (`arifinzainul764@gmail.com`) can create, update, or delete `/authorizedStaff/{staffId}` documents (keyed by normalized `nipKey`, requiring `nip`, `displayName`, `jabatan`, and salted `passwordHash`; `email` is optional). Verified staff members may only `get` or `list` their own record matching `request.auth.token.email.lower()` (when email is non-empty).
 
