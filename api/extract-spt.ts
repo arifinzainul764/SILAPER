@@ -133,6 +133,7 @@ function clampMaxOneA4Line(rawText: unknown, maxChars = MAX_A4_LINE_CHARS): stri
 }
 
 interface SptExtractionPayload {
+  documentType?: 'spt' | 'dasar';
   fileName: string;
   extractedText?: string;
   kopImageBase64?: string;
@@ -155,6 +156,7 @@ async function generateSptWithRetry(
     { model: PRIMARY_MODEL, thinkingLevel: ThinkingLevel.LOW, delayBeforeMs: 500, timeoutMs: 32000 },
   ];
 
+  const isDasar = input.documentType === 'dasar';
   const parts: Array<{ inlineData?: { mimeType: string; data: string }; text?: string }> = [];
   const hasPageImages = Array.isArray(input.pageImagesBase64) && input.pageImagesBase64.length > 0;
   const hasText = typeof input.extractedText === 'string' && input.extractedText.trim().length >= 80;
@@ -171,7 +173,7 @@ async function generateSptWithRetry(
         });
       }
     }
-  } else if (hasText) {
+  } else if (hasText && !isDasar) {
     const cleanKop = String(input.kopImageBase64 || '').replace(/^data:[^;]*;base64,/, '').trim();
     if (cleanKop) {
       parts.push({
@@ -181,7 +183,7 @@ async function generateSptWithRetry(
         },
       });
     }
-  } else if (input.pdfBase64) {
+  } else if (!hasText && input.pdfBase64) {
     parts.push({
       inlineData: {
         mimeType: 'application/pdf',
@@ -190,15 +192,28 @@ async function generateSptWithRetry(
     });
   }
 
+  const defaultDocName = isDasar ? 'Surat_Dasar.pdf' : 'SPT.pdf';
   const textContextSection = hasText
-    ? `\n\nTeks hasil pembacaan PDF (${input.fileName || 'SPT.pdf'}):\n"""\n${input.extractedText!.trim().slice(0, 18000)}\n"""`
+    ? `\n\nTeks hasil pembacaan PDF (${input.fileName || defaultDocName}):\n"""\n${input.extractedText!.trim().slice(0, 18000)}\n"""`
     : '';
-  const logoImageHint = !hasPageImages && hasText && input.kopImageBase64
+  const logoImageHint = !isDasar && !hasPageImages && hasText && input.kopImageBase64
     ? ' Gambar yang dilampirkan adalah potongan bagian atas Kop Surat halaman pertama; gunakan gambar tersebut untuk membaca format teks Kop Surat secara persis serta mendeteksi hasKopLogo, logoBox, dan kopBox (koordinat 0-1000 relatif terhadap gambar potongan Kop Surat).'
     : '';
 
-  parts.push({
-    text: `Anda adalah asisten administrasi pemerintahan tingkat Kecamatan di Indonesia.
+  if (isDasar) {
+    parts.push({
+      text: `Anda adalah asisten administrasi pemerintahan tingkat Kecamatan di Indonesia.
+Baca dokumen Surat Dasar berikut (${input.fileName || 'Surat_Dasar.pdf'}) seperti Surat Undangan, Nota Dinas, Surat Pemberitahuan, Surat Tugas Instansi Induk, atau dokumen dasar perjalanan dinas lainnya secara akurat.
+Ekstrak informasi berikut dalam bahasa Indonesia formal dengan teks biasa (tanpa format tebal/bold, miring/italic, garis bawah/underline, dan tanpa angka urutan di depan):
+1. dasarSurat: 1 kalimat referensi resmi yang menyebutkan jenis surat/dokumen & instansi penerbit, nomor surat (jika tercantum), tanggal surat (jika tercantum), serta perihal/maksud surat secara ringkas dan jelas. Contoh: "Surat Undangan Sekretaris Daerah Kabupaten Sidoarjo Nomor 005/142/438.1/2026 tanggal 10 November 2026 perihal Rapat Koordinasi Evaluasi Kinerja."
+2. tujuan: Lokasi, tempat, atau instansi tujuan kegiatan apabila tercantum di surat (kosongkan "" jika tidak tertulis).
+3. maksudPerjalanan: Uraian ringkas maksud/agenda kegiatan berdasarkan isi surat dasar (kosongkan "" jika tidak tertulis).
+4. tanggalBerangkat: Tanggal mulai pelaksanaan kegiatan jika tercantum (kosongkan "" jika tidak tertulis).
+5. tanggalKembali: Tanggal selesai pelaksanaan kegiatan jika tercantum (kosongkan "" jika tidak tertulis).${textContextSection}`,
+    });
+  } else {
+    parts.push({
+      text: `Anda adalah asisten administrasi pemerintahan tingkat Kecamatan di Indonesia.
 Ekstrak seluruh informasi penting dari dokumen Surat Perintah Tugas (SPT) berikut (${input.fileName || 'SPT.pdf'}) secara akurat dalam bahasa Indonesia formal.
 Jika ada kolom identitas atau nomor yang tidak tertulis secara eksplisit di SPT, isi dengan string kosong "" (jangan mengarang NIP atau nomor surat).
 Untuk dasarHukum, tulis dengan teks biasa (tanpa format tebal/bold, miring/italic, atau garis bawah/underline) dan pisahkan setiap poin dengan baris baru serta penomoran 1., 2., 3., dst. jika terdapat lebih dari satu dasar hukum.
@@ -207,7 +222,83 @@ Periksa bagian Kop Surat pada halaman pertama SPT dengan sangat teliti:
 - Jika terdapat lambang/logo instansi di kiri atas Kop Surat, set hasKopLogo: true dan isi logoBox dengan koordinat bounding box [ymin, xmin, ymax, xmax] berskala 0 sampai 1000 yang melingkupi HANYA gambar/lambang logo secara ketat dan presisi — JANGAN menyertakan garis pembatas hitam horizontal di bawah kop surat maupun teks di samping logo (jika tidak ada logo di Kop Surat, set hasKopLogo: false dan logoBox: []).
 - Isi kopBox dengan bounding box [ymin, xmin, ymax, xmax] berskala 0 sampai 1000 yang melingkupi seluruh blok Kop Surat halaman pertama (mulai dari sisi atas logo/baris pertama Kop hingga tepat di bawah garis pembatas bawah Kop Surat, TIDAK termasuk judul "SURAT PERINTAH TUGAS").${logoImageHint}
 Selain itu, buatlah draf otomatis untuk kolom hasilPelaksanaan (V. Hasil Pelaksanaan Kegiatan) dan kesimpulanSaran (VI. Kesimpulan dan Saran) yang selaras dengan maksud perjalanan dan tujuan pada SPT dalam bahasa Indonesia dinas yang formal. Masing-masing kolom hasilPelaksanaan dan kesimpulanSaran WAJIB berupa 1 kalimat sangat singkat (maksimal 65–72 karakter, tanpa penomoran dan tanpa baris baru) agar tepat muat dalam paling banyak 1 baris pada kertas A4.${textContextSection}`,
-  });
+    });
+  }
+
+  const responseSchema = isDasar
+    ? {
+        type: Type.OBJECT,
+        properties: {
+          dasarSurat: {
+            type: Type.STRING,
+            description:
+              '1 kalimat referensi resmi Surat Dasar dalam teks biasa (jenis surat & instansi penerbit, nomor surat, tanggal surat, dan perihal)',
+          },
+          tujuan: {
+            type: Type.STRING,
+            description: 'Lokasi atau instansi tujuan kegiatan jika tercantum pada Surat Dasar',
+          },
+          maksudPerjalanan: {
+            type: Type.STRING,
+            description: 'Ringkasan maksud/agenda kegiatan dari Surat Dasar',
+          },
+          tanggalBerangkat: {
+            type: Type.STRING,
+            description: 'Tanggal mulai kegiatan jika tercantum pada Surat Dasar',
+          },
+          tanggalKembali: {
+            type: Type.STRING,
+            description: 'Tanggal selesai kegiatan jika tercantum pada Surat Dasar',
+          },
+        },
+      }
+    : {
+        type: Type.OBJECT,
+        properties: {
+          namaKabupaten: { type: Type.STRING, description: 'Nama Pemerintah Kabupaten/Kota di Kop Surat persis seperti dokumen SPT' },
+          namaKecamatan: { type: Type.STRING, description: 'Nama Instansi/Kecamatan di Kop Surat persis seperti dokumen SPT' },
+          alamatKecamatan: { type: Type.STRING, description: 'Alamat lengkap kantor kecamatan beserta telp/email/laman/kode pos dengan pemisah baris \\n sesuai Kop Surat SPT' },
+          nomorSpt: { type: Type.STRING, description: 'Nomor Surat Perintah Tugas' },
+          tanggalSpt: { type: Type.STRING, description: 'Tanggal penetapan SPT' },
+          dasarHukum: { type: Type.STRING, description: 'Dasar hukum atau menimbang dalam SPT' },
+          namaPegawai: { type: Type.STRING, description: 'Nama lengkap pegawai yang ditugaskan' },
+          nip: { type: Type.STRING, description: 'Nomor Induk Pegawai (NIP)' },
+          pangkatGolongan: { type: Type.STRING, description: 'Pangkat dan Golongan ruang pegawai' },
+          jabatan: { type: Type.STRING, description: 'Jabatan pegawai yang ditugaskan' },
+          tujuan: { type: Type.STRING, description: 'Lokasi atau instansi tujuan perjalanan dinas' },
+          maksudPerjalanan: { type: Type.STRING, description: 'Maksud/keperluan tugas perjalanan dinas' },
+          tanggalBerangkat: { type: Type.STRING, description: 'Tanggal mulai/berangkat pelaksanaan tugas' },
+          tanggalKembali: { type: Type.STRING, description: 'Tanggal selesai/kembali pelaksanaan tugas' },
+          hasilPelaksanaan: {
+            type: Type.STRING,
+            description:
+              'Draf otomatis V. Hasil Pelaksanaan Kegiatan dalam bahasa dinas formal berdasarkan tujuan dan maksud perjalanan SPT, paling banyak 1 baris kertas A4 (1 kalimat singkat maksimal 70 karakter).',
+          },
+          kesimpulanSaran: {
+            type: Type.STRING,
+            description:
+              'Draf otomatis VI. Kesimpulan dan Saran dalam bahasa dinas formal berdasarkan tujuan dan maksud perjalanan SPT, paling banyak 1 baris kertas A4 (1 kalimat singkat maksimal 70 karakter).',
+          },
+          tempatLaporan: { type: Type.STRING, description: 'Nama tempat/kota/kecamatan penetapan surat' },
+          namaCamat: { type: Type.STRING, description: 'Nama pejabat penandatangan SPT (Camat/Sekcam)' },
+          nipCamat: { type: Type.STRING, description: 'NIP pejabat penandatangan SPT' },
+          pangkatCamat: { type: Type.STRING, description: 'Pangkat pejabat penandatangan SPT' },
+          hasKopLogo: {
+            type: Type.BOOLEAN,
+            description: 'Bernilai true jika terdapat lambang/logo instansi di kiri atas Kop Surat halaman pertama.',
+          },
+          logoBox: {
+            type: Type.ARRAY,
+            items: { type: Type.INTEGER },
+            description: 'Koordinat bounding box ketat HANYA untuk gambar logo instansi di Kop Surat halaman pertama [ymin, xmin, ymax, xmax] berskala 0-1000 tanpa garis pembatas bawah kop.',
+          },
+          kopBox: {
+            type: Type.ARRAY,
+            items: { type: Type.INTEGER },
+            description: 'Koordinat bounding box seluruh blok Kop Surat halaman pertama termasuk logo, teks kop, dan garis pembatas bawah kop [ymin, xmin, ymax, xmax] berskala 0-1000.',
+          },
+        },
+      };
 
   let lastError: unknown;
 
@@ -224,53 +315,7 @@ Selain itu, buatlah draf otomatis untuk kolom hasilPelaksanaan (V. Hasil Pelaksa
           abortSignal: AbortSignal.timeout(step.timeoutMs),
           thinkingConfig: { thinkingLevel: step.thinkingLevel },
           responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              namaKabupaten: { type: Type.STRING, description: 'Nama Pemerintah Kabupaten/Kota di Kop Surat persis seperti dokumen SPT' },
-              namaKecamatan: { type: Type.STRING, description: 'Nama Instansi/Kecamatan di Kop Surat persis seperti dokumen SPT' },
-              alamatKecamatan: { type: Type.STRING, description: 'Alamat lengkap kantor kecamatan beserta telp/email/laman/kode pos dengan pemisah baris \\n sesuai Kop Surat SPT' },
-              nomorSpt: { type: Type.STRING, description: 'Nomor Surat Perintah Tugas' },
-              tanggalSpt: { type: Type.STRING, description: 'Tanggal penetapan SPT' },
-              dasarHukum: { type: Type.STRING, description: 'Dasar hukum atau menimbang dalam SPT' },
-              namaPegawai: { type: Type.STRING, description: 'Nama lengkap pegawai yang ditugaskan' },
-              nip: { type: Type.STRING, description: 'Nomor Induk Pegawai (NIP)' },
-              pangkatGolongan: { type: Type.STRING, description: 'Pangkat dan Golongan ruang pegawai' },
-              jabatan: { type: Type.STRING, description: 'Jabatan pegawai yang ditugaskan' },
-              tujuan: { type: Type.STRING, description: 'Lokasi atau instansi tujuan perjalanan dinas' },
-              maksudPerjalanan: { type: Type.STRING, description: 'Maksud/keperluan tugas perjalanan dinas' },
-              tanggalBerangkat: { type: Type.STRING, description: 'Tanggal mulai/berangkat pelaksanaan tugas' },
-              tanggalKembali: { type: Type.STRING, description: 'Tanggal selesai/kembali pelaksanaan tugas' },
-              hasilPelaksanaan: {
-                type: Type.STRING,
-                description:
-                  'Draf otomatis V. Hasil Pelaksanaan Kegiatan dalam bahasa dinas formal berdasarkan tujuan dan maksud perjalanan SPT, paling banyak 1 baris kertas A4 (1 kalimat singkat maksimal 70 karakter).',
-              },
-              kesimpulanSaran: {
-                type: Type.STRING,
-                description:
-                  'Draf otomatis VI. Kesimpulan dan Saran dalam bahasa dinas formal berdasarkan tujuan dan maksud perjalanan SPT, paling banyak 1 baris kertas A4 (1 kalimat singkat maksimal 70 karakter).',
-              },
-              tempatLaporan: { type: Type.STRING, description: 'Nama tempat/kota/kecamatan penetapan surat' },
-              namaCamat: { type: Type.STRING, description: 'Nama pejabat penandatangan SPT (Camat/Sekcam)' },
-              nipCamat: { type: Type.STRING, description: 'NIP pejabat penandatangan SPT' },
-              pangkatCamat: { type: Type.STRING, description: 'Pangkat pejabat penandatangan SPT' },
-              hasKopLogo: {
-                type: Type.BOOLEAN,
-                description: 'Bernilai true jika terdapat lambang/logo instansi di kiri atas Kop Surat halaman pertama.',
-              },
-              logoBox: {
-                type: Type.ARRAY,
-                items: { type: Type.INTEGER },
-                description: 'Koordinat bounding box ketat HANYA untuk gambar logo instansi di Kop Surat halaman pertama [ymin, xmin, ymax, xmax] berskala 0-1000 tanpa garis pembatas bawah kop.',
-              },
-              kopBox: {
-                type: Type.ARRAY,
-                items: { type: Type.INTEGER },
-                description: 'Koordinat bounding box seluruh blok Kop Surat halaman pertama termasuk logo, teks kop, dan garis pembatas bawah kop [ymin, xmin, ymax, xmax] berskala 0-1000.',
-              },
-            },
-          },
+          responseSchema,
         },
       });
     } catch (err) {
@@ -307,13 +352,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     }
 
     const body = await readJsonBody(req);
+    const documentType: 'spt' | 'dasar' = body.documentType === 'dasar' ? 'dasar' : 'spt';
     const pdfBase64 = typeof body.pdfBase64 === 'string' ? body.pdfBase64 : '';
     const extractedText = typeof body.extractedText === 'string' ? body.extractedText : '';
     const kopImageBase64 = typeof body.kopImageBase64 === 'string' ? body.kopImageBase64 : '';
     const pageImagesBase64 = Array.isArray(body.pageImagesBase64)
       ? body.pageImagesBase64.filter((item): item is string => typeof item === 'string')
       : [];
-    const fileName = typeof body.fileName === 'string' ? body.fileName : 'SPT.pdf';
+    const fileName =
+      typeof body.fileName === 'string'
+        ? body.fileName
+        : documentType === 'dasar'
+          ? 'Surat_Dasar.pdf'
+          : 'SPT.pdf';
 
     const cleanBase64 = pdfBase64.replace(/^data:[^;]*;base64,/, '').trim();
     const hasExtractedText = extractedText.trim().length >= 80;
@@ -336,6 +387,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     });
 
     const response = await generateSptWithRetry(ai, {
+      documentType,
       fileName,
       extractedText,
       kopImageBase64,
@@ -347,7 +399,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       .replace(/^```(?:json)?\s*/i, '')
       .replace(/\s*```$/i, '');
     const parsed = JSON.parse(rawText || '{}') as Record<string, unknown>;
-    if (parsed && typeof parsed === 'object') {
+    if (parsed && typeof parsed === 'object' && documentType === 'spt') {
       parsed.hasilPelaksanaan = clampMaxOneA4Line(parsed.hasilPelaksanaan);
       parsed.kesimpulanSaran = clampMaxOneA4Line(parsed.kesimpulanSaran);
     }

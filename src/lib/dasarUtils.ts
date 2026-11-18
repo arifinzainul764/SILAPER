@@ -59,3 +59,41 @@ export function buildPendahuluanDasarItems(
     useNumbering: items.length > 1,
   };
 }
+
+export function cleanSingleDasarEntry(entry: string): string {
+  return stripListPrefix(stripMarkdownStyling((entry || '').replace(/\r?\n/g, ' ').trim()))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function appendDasarToText(existingDasar: string, newEntry: string): string {
+  const cleanedNew = cleanSingleDasarEntry(newEntry);
+  if (!cleanedNew) return existingDasar;
+
+  const existingLines = (existingDasar || '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => stripListPrefix(stripMarkdownStyling(line)))
+    .filter(Boolean);
+
+  const normalizedNewLower = cleanedNew.toLowerCase();
+  const alreadyExists = existingLines.some((line) => line.toLowerCase() === normalizedNewLower);
+  if (alreadyExists) {
+    return existingLines.join('\n');
+  }
+
+  return [...existingLines, cleanedNew].join('\n');
+}
+
+export function removeDasarFromText(existingDasar: string, targetEntry: string): string {
+  const cleanedTarget = cleanSingleDasarEntry(targetEntry).toLowerCase();
+  if (!cleanedTarget) return existingDasar;
+
+  const remaining = (existingDasar || '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => stripListPrefix(stripMarkdownStyling(line)))
+    .filter((line) => line && line.toLowerCase() !== cleanedTarget);
+
+  return remaining.join('\n');
+}

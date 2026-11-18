@@ -5,7 +5,6 @@ import {
   FileCheck2,
   FolderOpen,
   Lock,
-  LogIn,
   Plus,
   Search,
   Trash2,
@@ -22,7 +21,6 @@ interface ArchivePanelProps {
   reports: StoredTravelReport[];
   loadingReports: boolean;
   activeReportId: string | null;
-  onSignIn: () => void;
   onLoadReport: (report: StoredTravelReport) => void;
   onToggleReportStatus: (report: StoredTravelReport) => Promise<void>;
   onDeleteReport: (reportId: string) => Promise<void>;
@@ -38,7 +36,6 @@ export const ArchivePanel: React.FC<ArchivePanelProps> = ({
   reports,
   loadingReports,
   activeReportId,
-  onSignIn,
   onLoadReport,
   onToggleReportStatus,
   onDeleteReport,
@@ -86,16 +83,8 @@ export const ArchivePanel: React.FC<ArchivePanelProps> = ({
             Arsip Laporan Rahasia Kecamatan
           </h2>
           <p className="text-sm text-[#475569] mt-2 leading-relaxed">
-            Untuk menjaga kerahasiaan data perjalanan dinas, NIP pegawai, dan lampiran dokumentasi instansi, arsip laporan hanya dapat diakses oleh akun staf yang terautentikasi.
+            Untuk menjaga kerahasiaan data perjalanan dinas, NIP pegawai, dan lampiran dokumentasi instansi, arsip laporan hanya dapat diakses menggunakan akun yang dibuat oleh Administrator Kecamatan Tarik.
           </p>
-          <button
-            type="button"
-            onClick={onSignIn}
-            className="mt-6 inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-white bg-[#0F2A56] rounded-md hover:bg-[#1E3A8A] transition-colors whitespace-nowrap"
-          >
-            <LogIn className="w-4 h-4" />
-            Masuk dengan Google
-          </button>
         </div>
       </div>
     );
@@ -121,7 +110,7 @@ export const ArchivePanel: React.FC<ArchivePanelProps> = ({
             className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-[#0F2A56] rounded-md hover:bg-[#1E3A8A] transition-colors whitespace-nowrap shrink-0"
           >
             <Plus className="w-4 h-4" />
-            Buat Laporan Baru
+            Buat SPPD Baru
           </button>
         </div>
 
@@ -170,7 +159,7 @@ export const ArchivePanel: React.FC<ArchivePanelProps> = ({
                 : 'Tidak ada laporan yang cocok dengan filter pencarian.'}
             </p>
             <p className="text-xs text-[#64748B] mt-1">
-              Klik tombol &ldquo;Buat Laporan Baru&rdquo; di atas untuk menyusun laporan lalu tekan &ldquo;Simpan ke Arsip&rdquo;.
+              Klik tombol &ldquo;Buat SPPD Baru&rdquo; di atas untuk menyusun laporan lalu tekan &ldquo;Simpan ke Arsip&rdquo;.
             </p>
           </div>
         ) : (

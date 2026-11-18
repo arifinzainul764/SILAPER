@@ -24,6 +24,14 @@ import { SAMPLE_SPT_EXTRACTED } from '../lib/sampleData';
 import { REPORT_FIELD_LIMITS, ReportPhoto, TravelReportData } from '../types/report';
 import { OfficialEmblem } from './OfficialEmblem';
 
+export interface ExtractedSuratDasar {
+  dasarSurat?: string;
+  tujuan?: string;
+  maksudPerjalanan?: string;
+  tanggalBerangkat?: string;
+  tanggalKembali?: string;
+}
+
 interface ReportFormProps {
   report: TravelReportData;
   isUnlocked: boolean;
@@ -31,6 +39,8 @@ interface ReportFormProps {
   onToggleUnlock: () => void;
   onChangeField: <K extends keyof TravelReportData>(field: K, value: TravelReportData[K]) => void;
   onApplyExtractedSpt: (extracted: Partial<TravelReportData>, sourceFileName: string) => void;
+  onApplyExtractedDasar: (extracted: ExtractedSuratDasar, sourceFileName: string) => void;
+  onClearExtractedDasar?: (previousDasarEntry: string) => void;
 }
 
 export const ReportForm: React.FC<ReportFormProps> = ({
@@ -40,8 +50,11 @@ export const ReportForm: React.FC<ReportFormProps> = ({
   onToggleUnlock,
   onChangeField,
   onApplyExtractedSpt,
+  onApplyExtractedDasar,
+  onClearExtractedDasar,
 }) => {
   const pdfInputRef = useRef<HTMLInputElement>(null);
+  const dasarPdfInputRef = useRef<HTMLInputElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
 
   const [isExtracting, setIsExtracting] = useState(false);
@@ -51,6 +64,16 @@ export const ReportForm: React.FC<ReportFormProps> = ({
     type: 'success' | 'error' | 'info';
     message: string;
   } | null>(null);
+
+  const [isExtractingDasar, setIsExtractingDasar] = useState(false);
+  const [uploadedDasarPdfName, setUploadedDasarPdfName] = useState<string>('');
+  const [lastDasarPdfFile, setLastDasarPdfFile] = useState<File | null>(null);
+  const [lastExtractedDasarEntry, setLastExtractedDasarEntry] = useState<string>('');
+  const [dasarExtractStatus, setDasarExtractStatus] = useState<{
+    type: 'success' | 'error' | 'info';
+    message: string;
+  } | null>(null);
+
   const [photoError, setPhotoError] = useState<string | null>(null);
   const [isProcessingPhoto, setIsProcessingPhoto] = useState(false);
   const [showInstansiSection, setShowInstansiSection] = useState(false);
@@ -233,6 +256,150 @@ export const ReportForm: React.FC<ReportFormProps> = ({
         message: `Simulasi ekstraksi otomatis dari "${demoFile}" selesai termasuk draf V. Hasil Pelaksanaan Kegiatan & VI. Kesimpulan dan Saran (maks. 1 baris A4). Klik "Ubah Data" untuk menyunting.`,
       });
     }, 550);
+  };
+
+  const handleDasarPdfFile = async (file: File) => {
+    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+      setDasarExtractStatus({
+        type: 'error',
+        message: 'Format file tidak valid. Harap unggah dokumen Surat Dasar berformat PDF (.pdf).',
+      });
+      return;
+    }
+
+    if (file.size > 12 * 1024 * 1024) {
+      setDasarExtractStatus({
+        type: 'error',
+        message: 'Ukuran file PDF Surat Dasar maksimal 12 MB.',
+      });
+      return;
+    }
+
+    setLastDasarPdfFile(file);
+    setUploadedDasarPdfName(file.name);
+    setIsExtractingDasar(true);
+    setDasarExtractStatus(null);
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 90000);
+
+    try {
+      const prepared = await preparePdfForExtraction(file);
+      const hasPreparedPayload =
+        prepared.extractedText.trim().length >= 80 ||
+        prepared.pageImagesBase64.length > 0;
+
+      const fallbackPdfBase64 = !hasPreparedPayload
+        ? await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(new Error('Gagal membaca file PDF Surat Dasar.'));
+            reader.onload = () => resolve(String(reader.result || ''));
+            reader.readAsDataURL(file);
+          })
+        : '';
+
+      const response = await fetch('/api/extract-spt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          documentType: 'dasar',
+          fileName: file.name,
+          extractedText: prepared.extractedText,
+          pageImagesBase64: prepared.pageImagesBase64,
+          ...(fallbackPdfBase64 ? { pdfBase64: fallbackPdfBase64 } : {}),
+        }),
+      });
+
+      const rawText = await response.text();
+      let payload: { extracted?: ExtractedSuratDasar; error?: string } = {};
+      try {
+        payload = rawText ? (JSON.parse(rawText) as typeof payload) : {};
+      } catch {
+        payload = {};
+      }
+
+      if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error(
+            'Endpoint /api/extract-spt tidak ditemukan di server (HTTP 404).',
+          );
+        }
+        if (response.status === 413) {
+          throw new Error(
+            'Ukuran file PDF melebihi batas upload server (HTTP 413). Silakan kompres PDF terlebih dahulu.',
+          );
+        }
+        if (response.status === 503) {
+          throw new Error(
+            payload?.error ||
+              'Server AI belum dikonfigurasi (GEMINI_API_KEY) atau sedang sibuk (503 UNAVAILABLE).',
+          );
+        }
+        if (response.status === 502 || response.status === 504) {
+          throw new Error(
+            payload?.error ||
+              `Server kehabisan waktu tunggu saat memproses PDF (HTTP ${response.status}). Silakan klik "Coba Lagi".`,
+          );
+        }
+        throw new Error(
+          payload?.error || `Gagal mengekstrak data dari PDF Surat Dasar (HTTP ${response.status}).`,
+        );
+      }
+
+      if (!payload || typeof payload.extracted !== 'object' || payload.extracted === null) {
+        throw new Error('Respons server untuk Surat Dasar bukan JSON yang valid.');
+      }
+
+      const extractedDasar = payload.extracted;
+      const resolvedCitation =
+        (extractedDasar.dasarSurat || '').trim() ||
+        `Surat Dasar (${file.name.replace(/\.pdf$/i, '')}).`;
+
+      if (lastExtractedDasarEntry && onClearExtractedDasar) {
+        onClearExtractedDasar(lastExtractedDasarEntry);
+      }
+      setLastExtractedDasarEntry(resolvedCitation);
+      onApplyExtractedDasar(
+        {
+          ...extractedDasar,
+          dasarSurat: resolvedCitation,
+        },
+        file.name,
+      );
+
+      setDasarExtractStatus({
+        type: 'success',
+        message: `Surat Dasar "${file.name}" berhasil dibaca dan ditambahkan ke bagian I. Pendahuluan / Dasar.`,
+      });
+    } catch (err) {
+      const isAbort = err instanceof DOMException && err.name === 'AbortError';
+      const msg = isAbort
+        ? 'Waktu tunggu ekstraksi Surat Dasar habis (melebihi 90 detik).'
+        : err instanceof Error
+          ? err.message
+          : 'Gagal memproses file PDF Surat Dasar.';
+      setDasarExtractStatus({
+        type: 'error',
+        message: `${msg} Anda dapat menekan "Coba Lagi" atau menambahkan dasar hukum secara manual pada kolom 04.`,
+      });
+    } finally {
+      window.clearTimeout(timeoutId);
+      setIsExtractingDasar(false);
+    }
+  };
+
+  const handleClearDasarPdf = () => {
+    if (lastExtractedDasarEntry && onClearExtractedDasar) {
+      onClearExtractedDasar(lastExtractedDasarEntry);
+    }
+    setUploadedDasarPdfName('');
+    setLastDasarPdfFile(null);
+    setLastExtractedDasarEntry('');
+    setDasarExtractStatus(null);
+    if (dasarPdfInputRef.current) {
+      dasarPdfInputRef.current.value = '';
+    }
   };
 
   const handlePhotoSelect = async (files: FileList | null) => {
@@ -425,7 +592,121 @@ export const ReportForm: React.FC<ReportFormProps> = ({
         )}
       </section>
 
-      {/* 02. Unggah Foto Dokumentasi (Maksimal 4 Foto) */}
+      {/* 02. Unggah PDF Surat Dasar */}
+      <section className="bg-white border border-[#D8E0EB] rounded-lg p-5">
+        <div className="flex items-start justify-between gap-4 mb-3">
+          <div>
+            <h2 className="text-base font-semibold text-[#0F172A]">
+              02. Unggah PDF Surat Dasar
+            </h2>
+            <p className="text-xs text-[#475569] mt-0.5">
+              Unggah surat undangan, nota dinas, atau surat referensi dasar tugas (.pdf) untuk ditambahkan ke bagian I. Pendahuluan / Dasar.
+            </p>
+          </div>
+          <span className="text-[11px] font-medium text-[#64748B] whitespace-nowrap shrink-0">
+            Opsional
+          </span>
+        </div>
+
+        <div
+          onDragOver={(e) => {
+            e.preventDefault();
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            const file = e.dataTransfer.files?.[0];
+            if (file) handleDasarPdfFile(file);
+          }}
+          className="border border-dashed border-[#94A3B8] bg-[#F8FAFC] rounded-md p-4 text-center transition-colors hover:border-[#0F2A56]"
+        >
+          <input
+            ref={dasarPdfInputRef}
+            type="file"
+            accept=".pdf,application/pdf"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) handleDasarPdfFile(file);
+              e.target.value = '';
+            }}
+          />
+
+          <div className="flex flex-col items-center">
+            {isExtractingDasar ? (
+              <Loader2 className="w-7 h-7 text-[#0F2A56] animate-spin mb-2" />
+            ) : (
+              <UploadCloud className="w-7 h-7 text-[#0F2A56] mb-2" />
+            )}
+
+            <p className="text-sm font-medium text-[#0F172A]">
+              {isExtractingDasar
+                ? 'Sedang membaca dokumen Surat Dasar...'
+                : uploadedDasarPdfName
+                  ? `File terpilih: ${uploadedDasarPdfName}`
+                  : 'Seret file PDF Surat Dasar ke sini atau pilih dokumen'}
+            </p>
+            <p className="text-xs text-[#64748B] mt-1">
+              Format PDF resmi (.pdf) · Ukuran maksimal 12 MB
+            </p>
+
+            <div className="mt-3 flex flex-wrap items-center justify-center gap-2.5">
+              <button
+                type="button"
+                disabled={isExtractingDasar}
+                onClick={() => dasarPdfInputRef.current?.click()}
+                className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold text-white bg-[#0F2A56] rounded-md hover:bg-[#1E3A8A] disabled:opacity-60 transition-colors whitespace-nowrap shrink-0"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                {uploadedDasarPdfName ? 'Ganti File PDF Surat Dasar' : 'Pilih File PDF Surat Dasar'}
+              </button>
+              {uploadedDasarPdfName && !isExtractingDasar && (
+                <button
+                  type="button"
+                  onClick={handleClearDasarPdf}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[#DC2626] bg-white border border-[#FECACA] rounded-md hover:bg-[#FEF2F2] transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Hapus File
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {dasarExtractStatus && (
+          <div
+            role="status"
+            className={`mt-3 flex items-start gap-2 rounded-md border px-3 py-2.5 text-xs ${
+              dasarExtractStatus.type === 'success'
+                ? 'border-[#BBF7D0] bg-[#F0FDF4] text-[#166534]'
+                : dasarExtractStatus.type === 'error'
+                  ? 'border-[#FECACA] bg-[#FEF2F2] text-[#991B1B]'
+                  : 'border-[#CBD5E1] bg-[#F8FAFC] text-[#334155]'
+            }`}
+          >
+            {dasarExtractStatus.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+            ) : (
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            )}
+            <div className="flex-1 space-y-2">
+              <span className="block">{dasarExtractStatus.message}</span>
+              {dasarExtractStatus.type === 'error' && lastDasarPdfFile && (
+                <button
+                  type="button"
+                  disabled={isExtractingDasar}
+                  onClick={() => handleDasarPdfFile(lastDasarPdfFile)}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold text-[#991B1B] bg-white border border-[#FCA5A5] rounded hover:bg-[#FEE2E2] disabled:opacity-50 transition-colors"
+                >
+                  Coba Lagi
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* 03. Unggah Foto Dokumentasi (Maksimal 4 Foto) */}
       <section
         id="section-foto-dokumentasi"
         className={`bg-white border rounded-lg p-5 transition-colors ${
@@ -437,7 +718,7 @@ export const ReportForm: React.FC<ReportFormProps> = ({
         <div className="flex items-start justify-between gap-4 mb-3">
           <div>
             <h2 className="text-base font-semibold text-[#0F172A]">
-              02. Foto Dokumentasi Kegiatan
+              03. Foto Dokumentasi Kegiatan
               <span className="text-[#DC2626] font-bold ml-1" aria-hidden="true">*</span>
             </h2>
             <p className="text-xs text-[#475569] mt-0.5">
@@ -490,7 +771,7 @@ export const ReportForm: React.FC<ReportFormProps> = ({
 
         {showRequiredErrors && report.photos.length === 0 && (
           <p className="text-[11px] text-[#DC2626] mt-2">
-            Kolom 02. Foto Dokumentasi Kegiatan wajib diisi (unggah minimal 1 foto).
+            Kolom 03. Foto Dokumentasi Kegiatan wajib diisi (unggah minimal 1 foto).
           </p>
         )}
 
@@ -547,12 +828,12 @@ export const ReportForm: React.FC<ReportFormProps> = ({
         )}
       </section>
 
-      {/* 03. Variabel Ekstraksi SPT & Status Kunci */}
+      {/* 04. Variabel Ekstraksi SPT & Status Kunci */}
       <section className="bg-white border border-[#D8E0EB] rounded-lg p-5">
         <div className="flex flex-wrap items-center justify-between gap-3 pb-3 mb-4 border-b border-[#E2E8F0]">
           <div>
             <h2 className="text-base font-semibold text-[#0F172A]">
-              03. Data Surat Perintah Tugas & Pelaksana
+              04. Data Surat Perintah Tugas & Pelaksana
             </h2>
             <p className="text-xs text-[#475569] mt-0.5">
               {isUnlocked
@@ -925,12 +1206,12 @@ export const ReportForm: React.FC<ReportFormProps> = ({
         </div>
       </section>
 
-      {/* 04. Isi Laporan Pelaksanaan (Romawi V - VII) */}
+      {/* 05. Isi Laporan Pelaksanaan (Romawi V - VII) */}
       <section className="bg-white border border-[#D8E0EB] rounded-lg p-5">
         <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
           <div>
             <h2 className="text-base font-semibold text-[#0F172A]">
-              04. Uraian Hasil & Penutup (Romawi V – VII)
+              05. Uraian Hasil & Penutup (Romawi V – VII)
             </h2>
             <p className="text-xs text-[#475569] mt-0.5">
               {isUnlocked

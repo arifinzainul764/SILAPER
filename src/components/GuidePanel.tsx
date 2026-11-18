@@ -63,7 +63,7 @@ export const GuidePanel: React.FC = () => {
               Kerahasiaan Arsip Berbasis Autentikasi Staf
             </h3>
             <p className="text-xs text-[#475569] mt-1 leading-relaxed">
-              Masuk menggunakan akun Google resmi untuk menyimpan laporan ke menu Arsip Tersimpan. Setiap dokumen dilindungi aturan keamanan database sehingga hanya pemilik akun bersangkutan yang dapat membaca, menyunting, atau menghapus laporannya.
+              Masuk menggunakan akun resmi (NIP atau Email dan Kata Sandi) yang dibuat oleh Administrator untuk menyimpan laporan ke menu SPPD. Setiap dokumen dilindungi aturan keamanan database sehingga hanya pemilik akun bersangkutan yang dapat membaca, menyunting, atau menghapus laporannya.
             </p>
           </div>
         </div>

@@ -5,7 +5,6 @@ import {
   sendEmailVerification,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
-  signInWithPopup,
   signOut,
   updateProfile,
 } from 'firebase/auth';
@@ -31,6 +30,7 @@ import {
   CloudUpload,
   FileDown,
   FileText,
+  Home,
   Info,
   Loader2,
   LogOut,
@@ -47,16 +47,17 @@ import {
 import { A4Preview } from './components/A4Preview';
 import { ArchivePanel } from './components/ArchivePanel';
 import { GuidePanel } from './components/GuidePanel';
+import { HomePanel } from './components/HomePanel';
 import { LoginPage } from './components/LoginPage';
-import { ReportForm } from './components/ReportForm';
+import { ExtractedSuratDasar, ReportForm } from './components/ReportForm';
 import { EditStaffInput, StaffAdminPanel } from './components/StaffAdminPanel';
+import { appendDasarToText, cleanSingleDasarEntry, removeDasarFromText } from './lib/dasarUtils';
 import { exportReportToDocx } from './lib/exportDocx';
 import { exportReportToPdf } from './lib/exportPdf';
 import {
   OperationType,
   auth,
   db,
-  googleProvider,
   handleFirestoreError,
 } from './lib/firebase';
 import { SAMPLE_FULL_REPORT } from './lib/sampleData';
@@ -80,7 +81,7 @@ import {
   sanitizeReportForFirestore,
 } from './types/report';
 
-type ActiveTab = 'editor' | 'archive' | 'guide' | 'staff';
+type ActiveTab = 'home' | 'editor' | 'archive' | 'guide' | 'staff';
 
 const TEMP_ADMIN_STORAGE_KEY = 'silaper_temp_admin';
 const LOCAL_REPORTS_STORAGE_KEY = 'silaper_local_reports';
@@ -129,17 +130,13 @@ function mapFirebaseAuthError(err: unknown): string {
       return 'Metode login Email & Kata Sandi belum diaktifkan pada Firebase Console (Authentication → Sign-in method).';
     case 'auth/unauthorized-domain':
       return 'Domain aplikasi ini belum didaftarkan pada Firebase Console (Authentication → Settings → Authorized domains).';
-    case 'auth/popup-closed-by-user':
-      return 'Jendela masuk Google ditutup sebelum proses selesai.';
-    case 'auth/popup-blocked':
-      return 'Popup login diblokir oleh browser. Izinkan popup untuk situs ini lalu coba lagi.';
     default:
       return err instanceof Error ? err.message : 'Gagal melakukan autentikasi.';
   }
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('archive');
+  const [activeTab, setActiveTab] = useState<ActiveTab>('home');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState<boolean>(false);
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState<boolean>(true);
   const [report, setReport] = useState<TravelReportData>(() => createEmptyReport());
@@ -191,6 +188,8 @@ export default function App() {
   const [validationModalOpen, setValidationModalOpen] = useState<boolean>(false);
   const [validationMessages, setValidationMessages] = useState<string[]>([]);
   const [showRequiredErrors, setShowRequiredErrors] = useState<boolean>(false);
+  const [uploadedDasarCitation, setUploadedDasarCitation] = useState<string>('');
+  const [formSessionKey, setFormSessionKey] = useState<number>(0);
 
   // User Profile & Menubar Pop-up Menu states
   const [profileName, setProfileName] = useState<string>('Staf Kecamatan');
@@ -288,7 +287,7 @@ export default function App() {
       messages.push('V. HASIL PELAKSANAAN KEGIATAN dan VI. KESIMPULAN DAN SARAN wajib di isi');
     }
     if (isPhotosEmpty) {
-      messages.push('02. Foto Dokumentasi Kegiatan wajib di isi');
+      messages.push('03. Foto Dokumentasi Kegiatan wajib di isi');
     }
 
     if (messages.length > 0) {
@@ -341,9 +340,6 @@ export default function App() {
     setIsCheckingAccess(true);
     try {
       const emailLower = (currentUser.email || '').trim().toLowerCase();
-      const isGoogleProvider = currentUser.providerData.some(
-        (p) => p.providerId === 'google.com',
-      );
 
       // Firestore rules mandate verified email tokens for all authenticated accounts
       if (!currentUser.emailVerified) {
@@ -386,23 +382,8 @@ export default function App() {
               return false;
             }
             staffDisplayName = (staffData.displayName || '').trim();
-          } else if (isGoogleProvider) {
-            await signOut(auth);
-            setLoginError(
-              `Akun Google (${currentUser.email}) belum terdaftar oleh Administrator Kecamatan Tarik. Hubungi Admin untuk mendaftarkan email Anda.`,
-            );
-            setAccessGranted(false);
-            return false;
           }
         } catch (err) {
-          if (isGoogleProvider) {
-            await signOut(auth);
-            setLoginError(
-              'Gagal memverifikasi status pendaftaran akun. Pastikan akun Anda telah didaftarkan oleh Administrator.',
-            );
-            setAccessGranted(false);
-            return false;
-          }
           handleFirestoreError(err, OperationType.LIST, staffPath);
         }
       }
@@ -635,6 +616,7 @@ export default function App() {
       setProfileName('Administrator SILAPER');
       setProfileInstansi('Pemerintah Kecamatan Tarik');
       setSavedReports(readLocalReports());
+      setActiveTab('home');
       showToast('success', 'Masuk dengan akses penuh sementara (Admin).');
       return;
     }
@@ -681,6 +663,7 @@ export default function App() {
         setProfileName(matchedStaff.displayName);
         setProfileInstansi(matchedStaff.jabatan || 'Pemerintah Kecamatan Tarik');
         setSavedReports(readLocalReports(matchedStaff.nipKey));
+        setActiveTab('home');
         showToast('success', `Selamat datang, ${matchedStaff.displayName}.`);
         return;
       }
@@ -691,23 +674,9 @@ export default function App() {
       }
 
       await signInWithEmailAndPassword(auth, cleanIdentifier, password);
+      setActiveTab('home');
     } catch (err) {
       setLoginError(mapFirebaseAuthError(err));
-    } finally {
-      setIsAuthSubmitting(false);
-    }
-  };
-
-  const handleSignIn = async () => {
-    setLoginError(null);
-    setLoginNotice(null);
-    setIsAuthSubmitting(true);
-    try {
-      await signInWithPopup(auth, googleProvider);
-    } catch (err) {
-      const msg = mapFirebaseAuthError(err);
-      setLoginError(msg);
-      showToast('error', msg);
     } finally {
       setIsAuthSubmitting(false);
     }
@@ -786,7 +755,7 @@ export default function App() {
       if (auth.currentUser) {
         await signOut(auth);
       }
-      setActiveTab('archive');
+      setActiveTab('home');
       setLoginError(null);
       setLoginNotice(null);
     } catch (err) {
@@ -1231,7 +1200,9 @@ export default function App() {
         alamatKecamatan: extracted.alamatKecamatan || prev.alamatKecamatan,
         nomorSpt: extracted.nomorSpt || prev.nomorSpt,
         tanggalSpt: extracted.tanggalSpt || prev.tanggalSpt,
-        dasarHukum: extracted.dasarHukum || prev.dasarHukum,
+        dasarHukum: uploadedDasarCitation
+          ? appendDasarToText(extracted.dasarHukum || prev.dasarHukum, uploadedDasarCitation)
+          : extracted.dasarHukum || prev.dasarHukum,
         namaPegawai: extracted.namaPegawai || prev.namaPegawai,
         nip: extracted.nip || prev.nip,
         pangkatGolongan: extracted.pangkatGolongan || prev.pangkatGolongan,
@@ -1256,6 +1227,42 @@ export default function App() {
     setIsUnlocked(false);
   };
 
+  const handleApplyExtractedDasar = (
+    extracted: ExtractedSuratDasar,
+    _sourceFileName: string,
+  ) => {
+    const cleanEntry = cleanSingleDasarEntry(extracted.dasarSurat || '');
+    if (cleanEntry) {
+      setUploadedDasarCitation(cleanEntry);
+    }
+
+    setReport((prev) => ({
+      ...prev,
+      dasarHukum: cleanEntry ? appendDasarToText(prev.dasarHukum, cleanEntry) : prev.dasarHukum,
+      tujuan: prev.tujuan.trim() ? prev.tujuan : extracted.tujuan || prev.tujuan,
+      maksudPerjalanan: prev.maksudPerjalanan.trim()
+        ? prev.maksudPerjalanan
+        : extracted.maksudPerjalanan || prev.maksudPerjalanan,
+      tanggalBerangkat: prev.tanggalBerangkat.trim()
+        ? prev.tanggalBerangkat
+        : extracted.tanggalBerangkat || prev.tanggalBerangkat,
+      tanggalKembali: prev.tanggalKembali.trim()
+        ? prev.tanggalKembali
+        : extracted.tanggalKembali || prev.tanggalKembali,
+    }));
+    setShowRequiredErrors(false);
+  };
+
+  const handleClearExtractedDasar = (previousDasarEntry: string) => {
+    const targetToRemove = previousDasarEntry || uploadedDasarCitation;
+    setUploadedDasarCitation('');
+    if (!targetToRemove) return;
+    setReport((prev) => ({
+      ...prev,
+      dasarHukum: removeDasarFromText(prev.dasarHukum, targetToRemove),
+    }));
+  };
+
   const handleFillDemoData = () => {
     setReport({
       ...SAMPLE_FULL_REPORT,
@@ -1263,6 +1270,8 @@ export default function App() {
       kopBannerDataUrl: SAMPLE_FULL_REPORT.kopBannerDataUrl || '',
       photos: SAMPLE_FULL_REPORT.photos.map((p) => ({ ...p })),
     });
+    setUploadedDasarCitation('');
+    setFormSessionKey((prev) => prev + 1);
     setIsUnlocked(false);
     setShowRequiredErrors(false);
     setActiveReportId(null);
@@ -1272,6 +1281,8 @@ export default function App() {
 
   const handleResetReport = () => {
     setReport(createEmptyReport());
+    setUploadedDasarCitation('');
+    setFormSessionKey((prev) => prev + 1);
     setIsUnlocked(false);
     setShowRequiredErrors(false);
     setActiveReportId(null);
@@ -1281,6 +1292,8 @@ export default function App() {
 
   const handleStartNewReport = () => {
     setReport(createEmptyReport());
+    setUploadedDasarCitation('');
+    setFormSessionKey((prev) => prev + 1);
     setIsUnlocked(false);
     setShowRequiredErrors(false);
     setActiveReportId(null);
@@ -1331,7 +1344,8 @@ export default function App() {
     }
 
     if (!user) {
-      await handleSignIn();
+      showToast('error', 'Sesi autentikasi berakhir. Silakan masuk kembali menggunakan akun yang dibuat oleh Admin.');
+      await handleSignOut();
       return;
     }
 
@@ -1394,7 +1408,10 @@ export default function App() {
     });
     setActiveReportId(id);
     setActiveReportOriginalStatus(stored.status);
+    setUploadedDasarCitation('');
+    setFormSessionKey((prev) => prev + 1);
     setIsUnlocked(false);
+    setShowRequiredErrors(false);
     setActiveTab('editor');
     showToast('success', `Laporan SPT ${stored.nomorSpt} dimuat ke Editor.`);
   };
@@ -1529,6 +1546,11 @@ export default function App() {
 
   const navItems: { id: ActiveTab; label: string; icon: React.ReactNode }[] = [
     {
+      id: 'home',
+      label: 'Beranda',
+      icon: <Home className="w-4 h-4 shrink-0" />,
+    },
+    {
       id: 'archive',
       label: 'SPPD',
       icon: <Archive className="w-4 h-4 shrink-0" />,
@@ -1578,7 +1600,6 @@ export default function App() {
     return (
       <LoginPage
         onLoginWithEmail={handleLoginWithEmail}
-        onLoginWithGoogle={handleSignIn}
         onResetPassword={handleResetPassword}
         onResendVerification={handleResendVerification}
         onCheckVerification={handleCheckVerification}
@@ -1614,7 +1635,7 @@ export default function App() {
           <div className="px-5 h-16 flex items-center gap-3 border-b border-white/10">
             <button
               type="button"
-              onClick={() => handleSelectTab('archive')}
+              onClick={() => handleSelectTab('home')}
               className="inline-flex items-center gap-2.5 text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0 font-display"
             >
               <img
@@ -1715,7 +1736,7 @@ export default function App() {
             >
               <button
                 type="button"
-                onClick={() => handleSelectTab('archive')}
+                onClick={() => handleSelectTab('home')}
                 className="inline-flex items-center gap-2.5 text-base font-bold tracking-tight text-white whitespace-nowrap shrink-0 font-display"
               >
                 <img
@@ -1748,15 +1769,17 @@ export default function App() {
 
             {desktopSidebarOpen && (
               <span className="hidden lg:inline text-sm font-medium text-slate-200 truncate">
-                {activeTab === 'editor'
-                  ? activeReportId
-                    ? 'Sunting Laporan Perjalanan Dinas'
-                    : 'Buat Laporan Baru'
-                  : activeTab === 'archive'
-                    ? 'SPPD'
-                    : activeTab === 'staff'
-                      ? 'Kelola Akun Staf'
-                      : 'Panduan SPT'}
+                {activeTab === 'home'
+                  ? 'Beranda'
+                  : activeTab === 'editor'
+                    ? activeReportId
+                      ? 'Sunting Laporan Perjalanan Dinas'
+                      : 'Buat SPPD Baru'
+                    : activeTab === 'archive'
+                      ? 'SPPD'
+                      : activeTab === 'staff'
+                        ? 'Kelola Akun Staf'
+                        : 'Panduan SPT'}
               </span>
             )}
           </div>
@@ -1952,17 +1975,37 @@ export default function App() {
 
         {/* Main Content */}
         <main className="flex-1">
+          {activeTab === 'home' && (
+            <HomePanel
+              profileName={profileName}
+              profileInstansi={profileInstansi}
+              accountSubLabel={
+                user?.email || (localStaff ? `NIP. ${localStaff.nip}` : isTempAdmin ? 'Akses Administrator' : undefined)
+              }
+              reports={savedReports}
+              loadingReports={loadingReports}
+              isAdminUser={isAdminUser}
+              staffCount={staffList.length}
+              onCreateNewReport={handleStartNewReport}
+              onOpenReport={handleLoadFromArchive}
+              onNavigateTab={(tab) => handleSelectTab(tab)}
+            />
+          )}
+
           {activeTab === 'editor' && (
             <div className="px-6 py-6 flex flex-col xl:flex-row items-start gap-6">
               {/* Left Column: Input Form */}
               <div className="no-print w-full xl:w-[44%] shrink-0">
                 <ReportForm
+                  key={formSessionKey}
                   report={report}
                   isUnlocked={isUnlocked}
                   showRequiredErrors={showRequiredErrors}
                   onToggleUnlock={() => setIsUnlocked((prev) => !prev)}
                   onChangeField={handleFieldChange}
                   onApplyExtractedSpt={handleApplyExtractedSpt}
+                  onApplyExtractedDasar={handleApplyExtractedDasar}
+                  onClearExtractedDasar={handleClearExtractedDasar}
                 />
               </div>
 
@@ -2063,7 +2106,6 @@ export default function App() {
               reports={savedReports}
               loadingReports={loadingReports}
               activeReportId={activeReportId}
-              onSignIn={handleSignIn}
               onLoadReport={handleLoadFromArchive}
               onToggleReportStatus={handleToggleArchiveStatus}
               onDeleteReport={handleDeleteArchive}
