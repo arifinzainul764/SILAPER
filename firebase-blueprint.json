@@ -181,6 +181,16 @@
           "type": "array",
           "description": "Up to 4 compressed documentation photos with captions"
         },
+        "logoDataUrl": {
+          "type": "string",
+          "description": "Optional compressed data URL of the institution emblem scanned from uploaded SPT PDF",
+          "maxLength": 220000
+        },
+        "kopBannerDataUrl": {
+          "type": "string",
+          "description": "Optional compressed data URL of the full Kop Surat banner scanned from uploaded SPT PDF",
+          "maxLength": 220000
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -224,31 +234,53 @@
     },
     "AuthorizedStaff": {
       "title": "AuthorizedStaff",
-      "description": "Admin-provisioned staff account allowlist controlling access to SILAPER Kecamatan Tarik.",
+      "description": "Admin-provisioned staff account registry requiring NIP, full name, position, and salted password hash, with optional email.",
       "type": "object",
       "properties": {
-        "email": {
+        "nip": {
           "type": "string",
-          "format": "email",
-          "description": "Lowercase email address authorized by Admin",
-          "minLength": 3,
-          "maxLength": 180
+          "description": "Employee NIP (required)",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "nipKey": {
+          "type": "string",
+          "description": "Normalized alphanumeric NIP identifier matching document ID",
+          "minLength": 1,
+          "maxLength": 60,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
         "displayName": {
           "type": "string",
-          "description": "Full name of the authorized staff member",
+          "description": "Full name of the authorized staff member (required)",
           "minLength": 1,
           "maxLength": 120
         },
         "jabatan": {
           "type": "string",
-          "description": "Position title in Kecamatan Tarik",
+          "description": "Position title in Kecamatan Tarik (required)",
+          "minLength": 1,
           "maxLength": 160
         },
-        "nip": {
+        "passwordSalt": {
           "type": "string",
-          "description": "Employee NIP",
-          "maxLength": 60
+          "description": "Hex-encoded cryptographic salt for password hashing",
+          "minLength": 16,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]+$"
+        },
+        "passwordHash": {
+          "type": "string",
+          "description": "SHA-256 hex digest of salted staff password",
+          "minLength": 64,
+          "maxLength": 128,
+          "pattern": "^[a-f0-9]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Optional lowercase email address (empty string if omitted)",
+          "maxLength": 180
         },
         "active": {
           "type": "boolean",
@@ -272,7 +304,7 @@
           "description": "Server update timestamp"
         }
       },
-      "required": ["email", "displayName", "jabatan", "nip", "active", "addedBy", "createdAt", "updatedAt"]
+      "required": ["nip", "nipKey", "displayName", "jabatan", "passwordSalt", "passwordHash", "email", "active", "addedBy", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -286,7 +318,7 @@
     },
     "/authorizedStaff/{staffId}": {
       "schema": { "$ref": "#/entities/AuthorizedStaff" },
-      "description": "Admin-managed allowlist of authorized staff emails (keyed by lowercase email)."
+      "description": "Admin-managed registry of authorized staff accounts keyed by normalized NIP."
     }
   }
 }

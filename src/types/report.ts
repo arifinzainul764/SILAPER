@@ -32,6 +32,8 @@ export interface TravelReportData {
   pangkatCamat: string;
   status: ReportStatus;
   photos: ReportPhoto[];
+  logoDataUrl?: string;
+  kopBannerDataUrl?: string;
 }
 
 export interface StoredTravelReport extends TravelReportData {
@@ -69,6 +71,8 @@ export const REPORT_FIELD_LIMITS = {
   photoName: 160,
   photoId: 64,
   photoDataUrl: 220000,
+  logoDataUrl: 220000,
+  kopBannerDataUrl: 220000,
   maxPhotos: 4,
 } as const;
 
@@ -99,6 +103,8 @@ export function createEmptyReport(): TravelReportData {
     pangkatCamat: 'Pembina Tk. I (IV/b)',
     status: 'draft',
     photos: [],
+    logoDataUrl: '',
+    kopBannerDataUrl: '',
   };
 }
 
@@ -139,6 +145,8 @@ export function sanitizeReportForFirestore(
       caption: clamp(p.caption || '', REPORT_FIELD_LIMITS.photoCaption),
       dataUrl: (p.dataUrl || '').slice(0, REPORT_FIELD_LIMITS.photoDataUrl),
     })),
+    logoDataUrl: (report.logoDataUrl || '').slice(0, REPORT_FIELD_LIMITS.logoDataUrl),
+    kopBannerDataUrl: (report.kopBannerDataUrl || '').slice(0, REPORT_FIELD_LIMITS.kopBannerDataUrl),
   };
 }
 
@@ -149,17 +157,22 @@ export const STAFF_FIELD_LIMITS = {
   displayName: 120,
   jabatan: 160,
   nip: 60,
+  nipKey: 60,
+  passwordMin: 6,
+  passwordMax: 128,
 } as const;
 
 export interface AuthorizedStaff {
   id: string;
-  email: string;
+  nip: string;
+  nipKey: string;
   displayName: string;
   jabatan: string;
-  nip: string;
+  passwordSalt: string;
+  passwordHash: string;
+  email: string;
   active: boolean;
   addedBy: string;
   createdAt?: unknown;
   updatedAt?: unknown;
 }
-

@@ -11,8 +11,8 @@ type VercelResponse = ServerResponse & {
   json?: (data: unknown) => void;
 };
 
-const PRIMARY_MODEL = 'gemini-3.1-flash-lite';
-const FALLBACK_MODEL = 'gemini-4-hydrogen';
+const PRIMARY_MODEL = 'gemini-4-hydrogen';
+const FALLBACK_MODEL = 'gemini-3.1-flash-lite';
 
 function sendJson(res: VercelResponse, statusCode: number, payload: unknown): void {
   res.statusCode = statusCode;
@@ -132,10 +132,17 @@ function clampMaxOneA4Line(rawText: unknown, maxChars = MAX_A4_LINE_CHARS): stri
   return trimmed.endsWith('.') ? trimmed : `${trimmed}.`;
 }
 
+interface SptExtractionPayload {
+  fileName: string;
+  extractedText?: string;
+  kopImageBase64?: string;
+  pageImagesBase64?: string[];
+  pdfBase64?: string;
+}
+
 async function generateSptWithRetry(
   ai: GoogleGenAI,
-  cleanBase64: string,
-  fileName: string,
+  input: SptExtractionPayload,
 ) {
   const attemptsPlan: {
     model: string;
@@ -143,10 +150,64 @@ async function generateSptWithRetry(
     delayBeforeMs: number;
     timeoutMs: number;
   }[] = [
-    { model: PRIMARY_MODEL, thinkingLevel: ThinkingLevel.MINIMAL, delayBeforeMs: 0, timeoutMs: 12000 },
-    { model: FALLBACK_MODEL, thinkingLevel: ThinkingLevel.LOW, delayBeforeMs: 250, timeoutMs: 14000 },
-    { model: PRIMARY_MODEL, thinkingLevel: ThinkingLevel.MINIMAL, delayBeforeMs: 500, timeoutMs: 12000 },
+    { model: PRIMARY_MODEL, thinkingLevel: ThinkingLevel.LOW, delayBeforeMs: 0, timeoutMs: 38000 },
+    { model: FALLBACK_MODEL, thinkingLevel: ThinkingLevel.MINIMAL, delayBeforeMs: 250, timeoutMs: 32000 },
+    { model: PRIMARY_MODEL, thinkingLevel: ThinkingLevel.LOW, delayBeforeMs: 500, timeoutMs: 32000 },
   ];
+
+  const parts: Array<{ inlineData?: { mimeType: string; data: string }; text?: string }> = [];
+  const hasPageImages = Array.isArray(input.pageImagesBase64) && input.pageImagesBase64.length > 0;
+  const hasText = typeof input.extractedText === 'string' && input.extractedText.trim().length >= 80;
+
+  if (hasPageImages) {
+    for (const imgBase64 of (input.pageImagesBase64 || []).slice(0, 2)) {
+      const cleanImg = String(imgBase64 || '').replace(/^data:[^;]*;base64,/, '').trim();
+      if (cleanImg) {
+        parts.push({
+          inlineData: {
+            mimeType: 'image/jpeg',
+            data: cleanImg,
+          },
+        });
+      }
+    }
+  } else if (hasText) {
+    const cleanKop = String(input.kopImageBase64 || '').replace(/^data:[^;]*;base64,/, '').trim();
+    if (cleanKop) {
+      parts.push({
+        inlineData: {
+          mimeType: 'image/jpeg',
+          data: cleanKop,
+        },
+      });
+    }
+  } else if (input.pdfBase64) {
+    parts.push({
+      inlineData: {
+        mimeType: 'application/pdf',
+        data: input.pdfBase64,
+      },
+    });
+  }
+
+  const textContextSection = hasText
+    ? `\n\nTeks hasil pembacaan PDF (${input.fileName || 'SPT.pdf'}):\n"""\n${input.extractedText!.trim().slice(0, 18000)}\n"""`
+    : '';
+  const logoImageHint = !hasPageImages && hasText && input.kopImageBase64
+    ? ' Gambar yang dilampirkan adalah potongan bagian atas Kop Surat halaman pertama; gunakan gambar tersebut untuk membaca format teks Kop Surat secara persis serta mendeteksi hasKopLogo, logoBox, dan kopBox (koordinat 0-1000 relatif terhadap gambar potongan Kop Surat).'
+    : '';
+
+  parts.push({
+    text: `Anda adalah asisten administrasi pemerintahan tingkat Kecamatan di Indonesia.
+Ekstrak seluruh informasi penting dari dokumen Surat Perintah Tugas (SPT) berikut (${input.fileName || 'SPT.pdf'}) secara akurat dalam bahasa Indonesia formal.
+Jika ada kolom identitas atau nomor yang tidak tertulis secara eksplisit di SPT, isi dengan string kosong "" (jangan mengarang NIP atau nomor surat).
+Untuk dasarHukum, tulis dengan teks biasa (tanpa format tebal/bold, miring/italic, atau garis bawah/underline) dan pisahkan setiap poin dengan baris baru serta penomoran 1., 2., 3., dst. jika terdapat lebih dari satu dasar hukum.
+Periksa bagian Kop Surat pada halaman pertama SPT dengan sangat teliti:
+- Baca susunan teks Kop Surat persis seperti yang tampil (namaKabupaten untuk baris induk instansi seperti PEMERINTAH KABUPATEN ..., namaKecamatan untuk baris nama instansi/kecamatan utama, dan alamatKecamatan untuk seluruh baris alamat, telepon, pos-el/email, laman, serta kode pos dengan mempertahankan jeda baris \\n agar format barisnya sesuai Kop asli).
+- Jika terdapat lambang/logo instansi di kiri atas Kop Surat, set hasKopLogo: true dan isi logoBox dengan koordinat bounding box [ymin, xmin, ymax, xmax] berskala 0 sampai 1000 yang melingkupi HANYA gambar/lambang logo secara ketat dan presisi — JANGAN menyertakan garis pembatas hitam horizontal di bawah kop surat maupun teks di samping logo (jika tidak ada logo di Kop Surat, set hasKopLogo: false dan logoBox: []).
+- Isi kopBox dengan bounding box [ymin, xmin, ymax, xmax] berskala 0 sampai 1000 yang melingkupi seluruh blok Kop Surat halaman pertama (mulai dari sisi atas logo/baris pertama Kop hingga tepat di bawah garis pembatas bawah Kop Surat, TIDAK termasuk judul "SURAT PERINTAH TUGAS").${logoImageHint}
+Selain itu, buatlah draf otomatis untuk kolom hasilPelaksanaan (V. Hasil Pelaksanaan Kegiatan) dan kesimpulanSaran (VI. Kesimpulan dan Saran) yang selaras dengan maksud perjalanan dan tujuan pada SPT dalam bahasa Indonesia dinas yang formal. Masing-masing kolom hasilPelaksanaan dan kesimpulanSaran WAJIB berupa 1 kalimat sangat singkat (maksimal 65–72 karakter, tanpa penomoran dan tanpa baris baru) agar tepat muat dalam paling banyak 1 baris pada kertas A4.${textContextSection}`,
+  });
 
   let lastError: unknown;
 
@@ -158,23 +219,7 @@ async function generateSptWithRetry(
     try {
       return await ai.models.generateContent({
         model: step.model,
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType: 'application/pdf',
-                data: cleanBase64,
-              },
-            },
-            {
-              text: `Anda adalah asisten administrasi pemerintahan tingkat Kecamatan di Indonesia.
-Ekstrak seluruh informasi penting dari dokumen PDF Surat Perintah Tugas (SPT) berikut (${fileName || 'SPT.pdf'}) secara akurat dalam bahasa Indonesia formal.
-Jika ada kolom identitas atau nomor yang tidak tertulis secara eksplisit di PDF, isi dengan string kosong "" (jangan mengarang NIP atau nomor surat).
-Untuk dasarHukum, gabungkan poin-poin dasar hukum dengan format bernomor yang rapi jika ada lebih dari satu.
-Selain itu, buatlah draf otomatis untuk kolom hasilPelaksanaan (V. Hasil Pelaksanaan Kegiatan) dan kesimpulanSaran (VI. Kesimpulan dan Saran) yang selaras dengan maksud perjalanan dan tujuan pada SPT dalam bahasa Indonesia dinas yang formal. Masing-masing kolom hasilPelaksanaan dan kesimpulanSaran WAJIB berupa 1 kalimat sangat singkat (maksimal 65–72 karakter, tanpa penomoran dan tanpa baris baru) agar tepat muat dalam paling banyak 1 baris pada kertas A4.`,
-            },
-          ],
-        },
+        contents: { parts },
         config: {
           abortSignal: AbortSignal.timeout(step.timeoutMs),
           thinkingConfig: { thinkingLevel: step.thinkingLevel },
@@ -182,9 +227,9 @@ Selain itu, buatlah draf otomatis untuk kolom hasilPelaksanaan (V. Hasil Pelaksa
           responseSchema: {
             type: Type.OBJECT,
             properties: {
-              namaKabupaten: { type: Type.STRING, description: 'Nama Pemerintah Kabupaten/Kota di Kop Surat' },
-              namaKecamatan: { type: Type.STRING, description: 'Nama Kecamatan di Kop Surat' },
-              alamatKecamatan: { type: Type.STRING, description: 'Alamat lengkap kantor kecamatan' },
+              namaKabupaten: { type: Type.STRING, description: 'Nama Pemerintah Kabupaten/Kota di Kop Surat persis seperti dokumen SPT' },
+              namaKecamatan: { type: Type.STRING, description: 'Nama Instansi/Kecamatan di Kop Surat persis seperti dokumen SPT' },
+              alamatKecamatan: { type: Type.STRING, description: 'Alamat lengkap kantor kecamatan beserta telp/email/laman/kode pos dengan pemisah baris \\n sesuai Kop Surat SPT' },
               nomorSpt: { type: Type.STRING, description: 'Nomor Surat Perintah Tugas' },
               tanggalSpt: { type: Type.STRING, description: 'Tanggal penetapan SPT' },
               dasarHukum: { type: Type.STRING, description: 'Dasar hukum atau menimbang dalam SPT' },
@@ -210,6 +255,20 @@ Selain itu, buatlah draf otomatis untuk kolom hasilPelaksanaan (V. Hasil Pelaksa
               namaCamat: { type: Type.STRING, description: 'Nama pejabat penandatangan SPT (Camat/Sekcam)' },
               nipCamat: { type: Type.STRING, description: 'NIP pejabat penandatangan SPT' },
               pangkatCamat: { type: Type.STRING, description: 'Pangkat pejabat penandatangan SPT' },
+              hasKopLogo: {
+                type: Type.BOOLEAN,
+                description: 'Bernilai true jika terdapat lambang/logo instansi di kiri atas Kop Surat halaman pertama.',
+              },
+              logoBox: {
+                type: Type.ARRAY,
+                items: { type: Type.INTEGER },
+                description: 'Koordinat bounding box ketat HANYA untuk gambar logo instansi di Kop Surat halaman pertama [ymin, xmin, ymax, xmax] berskala 0-1000 tanpa garis pembatas bawah kop.',
+              },
+              kopBox: {
+                type: Type.ARRAY,
+                items: { type: Type.INTEGER },
+                description: 'Koordinat bounding box seluruh blok Kop Surat halaman pertama termasuk logo, teks kop, dan garis pembatas bawah kop [ymin, xmin, ymax, xmax] berskala 0-1000.',
+              },
             },
           },
         },
@@ -249,23 +308,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
     const body = await readJsonBody(req);
     const pdfBase64 = typeof body.pdfBase64 === 'string' ? body.pdfBase64 : '';
+    const extractedText = typeof body.extractedText === 'string' ? body.extractedText : '';
+    const kopImageBase64 = typeof body.kopImageBase64 === 'string' ? body.kopImageBase64 : '';
+    const pageImagesBase64 = Array.isArray(body.pageImagesBase64)
+      ? body.pageImagesBase64.filter((item): item is string => typeof item === 'string')
+      : [];
     const fileName = typeof body.fileName === 'string' ? body.fileName : 'SPT.pdf';
 
-    if (!pdfBase64) {
-      sendJson(res, 400, { error: 'Data PDF tidak valid atau kosong.' });
-      return;
-    }
-
     const cleanBase64 = pdfBase64.replace(/^data:[^;]*;base64,/, '').trim();
-    if (!cleanBase64) {
-      sendJson(res, 400, { error: 'Isi file PDF kosong atau tidak terbaca.' });
+    const hasExtractedText = extractedText.trim().length >= 80;
+    const hasPageImages = pageImagesBase64.length > 0;
+
+    if (!cleanBase64 && !hasExtractedText && !hasPageImages) {
+      sendJson(res, 400, { error: 'Data PDF kosong atau tidak terbaca.' });
       return;
     }
 
     const ai = new GoogleGenAI({
       apiKey,
       httpOptions: {
-        timeout: 14000,
+        timeout: 45000,
         retryOptions: { attempts: 1 },
         headers: {
           'User-Agent': 'aistudio-build',
@@ -273,7 +335,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       },
     });
 
-    const response = await generateSptWithRetry(ai, cleanBase64, fileName);
+    const response = await generateSptWithRetry(ai, {
+      fileName,
+      extractedText,
+      kopImageBase64,
+      pageImagesBase64,
+      pdfBase64: cleanBase64,
+    });
     const rawText = (response.text ?? '{}')
       .trim()
       .replace(/^```(?:json)?\s*/i, '')

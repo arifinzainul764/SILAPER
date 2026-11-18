@@ -47,7 +47,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     setLocalError(null);
     const cleanEmail = email.trim();
     if (!cleanEmail || !password) {
-      setLocalError('Masukkan email dan kata sandi akun staf terlebih dahulu.');
+      setLocalError('Masukkan NIP / email dan kata sandi akun staf terlebih dahulu.');
       return;
     }
     await onLoginWithEmail(cleanEmail, password);
@@ -56,8 +56,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const handleForgotPassword = async () => {
     setLocalError(null);
     const cleanEmail = email.trim();
-    if (!cleanEmail) {
-      setLocalError('Isikan alamat email Anda terlebih dahulu untuk mengirim tautan atur ulang kata sandi.');
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      setLocalError('Isikan alamat email terdaftar Anda terlebih dahulu untuk mengirim tautan atur ulang kata sandi.');
       return;
     }
     await onResetPassword(cleanEmail);
@@ -219,7 +219,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                     htmlFor="login-email"
                     className="block text-xs font-semibold text-[#334155] mb-1.5"
                   >
-                    Email Terdaftar
+                    NIP atau Email Terdaftar
                   </label>
                   <input
                     id="login-email"
@@ -229,7 +229,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                     required
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="nama.staf@kecamatantarik.go.id"
+                    placeholder="Masukkan NIP atau email staf"
                     className="w-full rounded-md border border-[#CBD5E1] bg-white px-3.5 py-2.5 text-sm text-[#0F172A] placeholder:text-[#94A3B8] focus:border-[#0F2A56] focus:outline-none focus:ring-2 focus:ring-[#0F2A56]/15"
                   />
                 </div>

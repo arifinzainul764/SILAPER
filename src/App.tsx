@@ -14,6 +14,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
   onSnapshot,
   query,
   serverTimestamp,
@@ -40,13 +41,15 @@ import {
   UserPen,
   UserRound,
   Zap,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import { A4Preview } from './components/A4Preview';
 import { ArchivePanel } from './components/ArchivePanel';
 import { GuidePanel } from './components/GuidePanel';
 import { LoginPage } from './components/LoginPage';
 import { ReportForm } from './components/ReportForm';
-import { StaffAdminPanel } from './components/StaffAdminPanel';
+import { EditStaffInput, StaffAdminPanel } from './components/StaffAdminPanel';
 import { exportReportToDocx } from './lib/exportDocx';
 import { exportReportToPdf } from './lib/exportPdf';
 import {
@@ -57,6 +60,16 @@ import {
   handleFirestoreError,
 } from './lib/firebase';
 import { SAMPLE_FULL_REPORT } from './lib/sampleData';
+import {
+  generateSaltHex,
+  hashStaffPassword,
+  normalizeNipKey,
+  readActiveStaffSession,
+  readLocalStaffRegistry,
+  verifyStaffPassword,
+  writeActiveStaffSession,
+  writeLocalStaffRegistry,
+} from './lib/staffAuth';
 import {
   ADMIN_EMAIL,
   AuthorizedStaff,
@@ -72,9 +85,13 @@ type ActiveTab = 'editor' | 'archive' | 'guide' | 'staff';
 const TEMP_ADMIN_STORAGE_KEY = 'silaper_temp_admin';
 const LOCAL_REPORTS_STORAGE_KEY = 'silaper_local_reports';
 
-function readLocalReports(): StoredTravelReport[] {
+function getReportStorageKey(staffNipKey?: string): string {
+  return staffNipKey ? `silaper_local_reports_${staffNipKey}` : LOCAL_REPORTS_STORAGE_KEY;
+}
+
+function readLocalReports(staffNipKey?: string): StoredTravelReport[] {
   try {
-    const raw = localStorage.getItem(LOCAL_REPORTS_STORAGE_KEY);
+    const raw = localStorage.getItem(getReportStorageKey(staffNipKey));
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? (parsed as StoredTravelReport[]) : [];
@@ -83,9 +100,9 @@ function readLocalReports(): StoredTravelReport[] {
   }
 }
 
-function writeLocalReports(reports: StoredTravelReport[]) {
+function writeLocalReports(reports: StoredTravelReport[], staffNipKey?: string) {
   try {
-    localStorage.setItem(LOCAL_REPORTS_STORAGE_KEY, JSON.stringify(reports));
+    localStorage.setItem(getReportStorageKey(staffNipKey), JSON.stringify(reports));
   } catch {
     // Ignore storage quota errors
   }
@@ -137,11 +154,19 @@ export default function App() {
       return false;
     }
   });
+  const [localStaff, setLocalStaff] = useState<AuthorizedStaff | null>(() =>
+    typeof window !== 'undefined' ? readActiveStaffSession() : null,
+  );
+  const hasLocalSession = isTempAdmin || Boolean(localStaff);
   const [authReady, setAuthReady] = useState<boolean>(false);
   const [isCheckingAccess, setIsCheckingAccess] = useState<boolean>(false);
   const [accessGranted, setAccessGranted] = useState<boolean>(() => {
     try {
-      return typeof window !== 'undefined' && sessionStorage.getItem(TEMP_ADMIN_STORAGE_KEY) === '1';
+      return (
+        typeof window !== 'undefined' &&
+        (sessionStorage.getItem(TEMP_ADMIN_STORAGE_KEY) === '1' ||
+          Boolean(readActiveStaffSession()))
+      );
     } catch {
       return false;
     }
@@ -176,6 +201,53 @@ export default function App() {
   const [draftProfileInstansi, setDraftProfileInstansi] = useState<string>('');
   const [isSavingProfile, setIsSavingProfile] = useState<boolean>(false);
   const profileMenuRef = useRef<HTMLDivElement>(null);
+
+  // Live Preview Zoom states (50% - 175%)
+  const [previewZoom, setPreviewZoom] = useState<number>(1);
+  const [previewSize, setPreviewSize] = useState<{ width: number; height: number }>({
+    width: 0,
+    height: 0,
+  });
+  const previewWrapperRef = useRef<HTMLDivElement>(null);
+  const previewContentRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = previewContentRef.current;
+    if (!el || activeTab !== 'editor') return;
+
+    const updateSize = () => {
+      setPreviewSize({
+        width: el.offsetWidth,
+        height: el.offsetHeight,
+      });
+    };
+
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [activeTab, accessGranted, hasLocalSession, report.photos.length, report.dasarHukum]);
+
+  const handleZoomOut = () => {
+    setPreviewZoom((prev) => Math.max(0.5, Math.round((prev - 0.1) * 100) / 100));
+  };
+
+  const handleZoomIn = () => {
+    setPreviewZoom((prev) => Math.min(1.75, Math.round((prev + 0.1) * 100) / 100));
+  };
+
+  const handleResetZoom = () => {
+    setPreviewZoom(1);
+  };
+
+  const handleFitPreviewWidth = () => {
+    const wrapper = previewWrapperRef.current;
+    const content = previewContentRef.current;
+    if (!wrapper || !content || content.offsetWidth === 0) return;
+    const availableWidth = Math.max(280, wrapper.clientWidth - 48);
+    const fitted = Math.min(1.5, Math.max(0.5, availableWidth / content.offsetWidth));
+    setPreviewZoom(Math.round(fitted * 100) / 100);
+  };
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -216,7 +288,7 @@ export default function App() {
       messages.push('V. HASIL PELAKSANAAN KEGIATAN dan VI. KESIMPULAN DAN SARAN wajib di isi');
     }
     if (isPhotosEmpty) {
-      messages.push('04. Foto Dokumentasi Kegiatan wajib di isi');
+      messages.push('02. Foto Dokumentasi Kegiatan wajib di isi');
     }
 
     if (messages.length > 0) {
@@ -293,11 +365,18 @@ export default function App() {
           return false;
         }
 
-        const staffPath = `authorizedStaff/${emailLower}`;
+        const staffPath = 'authorizedStaff';
         try {
-          const staffSnap = await getDoc(doc(db, 'authorizedStaff', emailLower));
-          if (staffSnap.exists()) {
-            const staffData = staffSnap.data() as { active?: boolean; displayName?: string };
+          const staffQuery = query(
+            collection(db, 'authorizedStaff'),
+            where('email', '==', emailLower),
+          );
+          const staffSnap = await getDocs(staffQuery);
+          if (!staffSnap.empty) {
+            const activeStaffDoc =
+              staffSnap.docs.find((d) => (d.data() as { active?: boolean }).active !== false) ||
+              staffSnap.docs[0];
+            const staffData = activeStaffDoc.data() as { active?: boolean; displayName?: string };
             if (staffData.active === false) {
               await signOut(auth);
               setLoginError(
@@ -324,7 +403,7 @@ export default function App() {
             setAccessGranted(false);
             return false;
           }
-          handleFirestoreError(err, OperationType.GET, staffPath);
+          handleFirestoreError(err, OperationType.LIST, staffPath);
         }
       }
 
@@ -397,6 +476,7 @@ export default function App() {
           sessionStorage.getItem(TEMP_ADMIN_STORAGE_KEY) === '1';
         if (hasTempAdmin) {
           setIsTempAdmin(true);
+          setLocalStaff(null);
           setAccessGranted(true);
           setNeedsEmailVerification(false);
           setIsCheckingAccess(false);
@@ -407,7 +487,22 @@ export default function App() {
           return;
         }
 
+        const savedStaffSession = readActiveStaffSession();
+        if (savedStaffSession) {
+          setIsTempAdmin(false);
+          setLocalStaff(savedStaffSession);
+          setAccessGranted(true);
+          setNeedsEmailVerification(false);
+          setIsCheckingAccess(false);
+          setAuthReady(true);
+          setProfileName(savedStaffSession.displayName);
+          setProfileInstansi(savedStaffSession.jabatan || 'Pemerintah Kecamatan Tarik');
+          setSavedReports(readLocalReports(savedStaffSession.nipKey));
+          return;
+        }
+
         setIsTempAdmin(false);
+        setLocalStaff(null);
         setAccessGranted(false);
         setNeedsEmailVerification(false);
         setIsCheckingAccess(false);
@@ -424,7 +519,9 @@ export default function App() {
       if (typeof window !== 'undefined') {
         sessionStorage.removeItem(TEMP_ADMIN_STORAGE_KEY);
       }
+      writeActiveStaffSession(null);
       setIsTempAdmin(false);
+      setLocalStaff(null);
       await verifyAccessAndSyncProfile(currentUser);
     });
 
@@ -433,7 +530,7 @@ export default function App() {
 
   // Attach real-time Firestore listener ONLY when authReady && user && accessGranted
   useEffect(() => {
-    if (!authReady || !user || !accessGranted || isTempAdmin) return;
+    if (!authReady || !user || !accessGranted || hasLocalSession) return;
 
     setLoadingReports(true);
     const reportsPath = `users/${user.uid}/reports`;
@@ -473,11 +570,19 @@ export default function App() {
     );
 
     return () => unsubscribe();
-  }, [authReady, user, accessGranted, isTempAdmin]);
+  }, [authReady, user, accessGranted, hasLocalSession]);
 
-  // Attach real-time Firestore listener for Admin's authorizedStaff allowlist
+  // Attach real-time Firestore listener for Admin's authorizedStaff allowlist (or local registry in temp-admin mode)
   useEffect(() => {
-    if (!authReady || !user || !accessGranted || !isAdminUser || isTempAdmin) return;
+    if (isTempAdmin && !user && accessGranted) {
+      const localRows = readLocalStaffRegistry();
+      localRows.sort((a, b) => a.displayName.localeCompare(b.displayName));
+      setStaffList(localRows);
+      setLoadingStaff(false);
+      return;
+    }
+
+    if (!authReady || !user || !accessGranted || !isAdminUser || hasLocalSession) return;
 
     setLoadingStaff(true);
     const staffPath = 'authorizedStaff';
@@ -498,6 +603,7 @@ export default function App() {
         });
         rows.sort((a, b) => a.displayName.localeCompare(b.displayName));
         setStaffList(rows);
+        writeLocalStaffRegistry(rows);
         setLoadingStaff(false);
       },
       (error) => {
@@ -507,18 +613,21 @@ export default function App() {
     );
 
     return () => unsubscribe();
-  }, [authReady, user, accessGranted, isAdminUser, isTempAdmin]);
+  }, [authReady, user, accessGranted, isAdminUser, isTempAdmin, hasLocalSession]);
 
-  const handleLoginWithEmail = async (email: string, password: string) => {
+  const handleLoginWithEmail = async (identifier: string, password: string) => {
     setLoginError(null);
     setLoginNotice(null);
 
-    if (email.trim().toLowerCase() === 'admin' && password === 'admin') {
+    const cleanIdentifier = identifier.trim();
+    if (cleanIdentifier.toLowerCase() === 'admin' && password === 'admin') {
       try {
         sessionStorage.setItem(TEMP_ADMIN_STORAGE_KEY, '1');
       } catch {
         // Ignore storage error
       }
+      writeActiveStaffSession(null);
+      setLocalStaff(null);
       setIsTempAdmin(true);
       setNeedsEmailVerification(false);
       setAccessGranted(true);
@@ -532,7 +641,56 @@ export default function App() {
 
     setIsAuthSubmitting(true);
     try {
-      await signInWithEmailAndPassword(auth, email.trim(), password);
+      const normalizedInputNip = normalizeNipKey(cleanIdentifier);
+      const emailCandidate = cleanIdentifier.toLowerCase();
+      const registry = readLocalStaffRegistry();
+      const matchedStaff = registry.find(
+        (item) =>
+          (normalizedInputNip && item.nipKey === normalizedInputNip) ||
+          (emailCandidate.includes('@') && item.email && item.email.toLowerCase() === emailCandidate),
+      );
+
+      if (matchedStaff) {
+        if (!matchedStaff.active) {
+          setLoginError(
+            `Akun staf ${matchedStaff.displayName} (NIP. ${matchedStaff.nip}) sedang dinonaktifkan oleh Administrator.`,
+          );
+          return;
+        }
+        const passwordValid = await verifyStaffPassword(
+          password,
+          matchedStaff.passwordSalt,
+          matchedStaff.passwordHash,
+        );
+        if (!passwordValid) {
+          setLoginError('Password akun staf tidak sesuai.');
+          return;
+        }
+
+        try {
+          sessionStorage.removeItem(TEMP_ADMIN_STORAGE_KEY);
+        } catch {
+          // Ignore storage error
+        }
+        writeActiveStaffSession(matchedStaff);
+        setIsTempAdmin(false);
+        setLocalStaff(matchedStaff);
+        setNeedsEmailVerification(false);
+        setAccessGranted(true);
+        setAuthReady(true);
+        setProfileName(matchedStaff.displayName);
+        setProfileInstansi(matchedStaff.jabatan || 'Pemerintah Kecamatan Tarik');
+        setSavedReports(readLocalReports(matchedStaff.nipKey));
+        showToast('success', `Selamat datang, ${matchedStaff.displayName}.`);
+        return;
+      }
+
+      if (!cleanIdentifier.includes('@')) {
+        setLoginError('NIP staf belum terdaftar oleh Administrator atau kata sandi tidak sesuai.');
+        return;
+      }
+
+      await signInWithEmailAndPassword(auth, cleanIdentifier, password);
     } catch (err) {
       setLoginError(mapFirebaseAuthError(err));
     } finally {
@@ -621,7 +779,9 @@ export default function App() {
       if (typeof window !== 'undefined') {
         sessionStorage.removeItem(TEMP_ADMIN_STORAGE_KEY);
       }
+      writeActiveStaffSession(null);
       setIsTempAdmin(false);
+      setLocalStaff(null);
       setAccessGranted(false);
       if (auth.currentUser) {
         await signOut(auth);
@@ -636,62 +796,101 @@ export default function App() {
   };
 
   const handleAddAuthorizedStaff = async (input: {
-    email: string;
+    nip: string;
     displayName: string;
     jabatan: string;
-    nip: string;
+    password: string;
+    email: string;
   }): Promise<boolean> => {
     if (!isAdminUser) return false;
-    const cleanEmail = input.email.trim().toLowerCase().slice(0, STAFF_FIELD_LIMITS.email);
+    const cleanNip = input.nip.trim().slice(0, STAFF_FIELD_LIMITS.nip);
+    const nipKey = normalizeNipKey(cleanNip).slice(0, STAFF_FIELD_LIMITS.nipKey);
     const cleanName = input.displayName.trim().slice(0, STAFF_FIELD_LIMITS.displayName);
     const cleanJabatan = input.jabatan.trim().slice(0, STAFF_FIELD_LIMITS.jabatan);
-    const cleanNip = input.nip.trim().slice(0, STAFF_FIELD_LIMITS.nip);
+    const cleanEmail = input.email.trim().toLowerCase().slice(0, STAFF_FIELD_LIMITS.email);
 
-    const emailRegex = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
-    if (!emailRegex.test(cleanEmail)) {
-      showToast('error', 'Format email staf tidak valid.');
+    if (!cleanNip || !nipKey) {
+      showToast('error', 'NIP wajib diisi dengan karakter huruf atau angka yang valid.');
+      return false;
+    }
+    if (!cleanName || !cleanJabatan) {
+      showToast('error', 'Nama Lengkap dan Jabatan wajib diisi.');
+      return false;
+    }
+    if (
+      !input.password ||
+      input.password.length < STAFF_FIELD_LIMITS.passwordMin ||
+      input.password.length > STAFF_FIELD_LIMITS.passwordMax
+    ) {
+      showToast(
+        'error',
+        `Password wajib diisi minimal ${STAFF_FIELD_LIMITS.passwordMin} karakter.`,
+      );
+      return false;
+    }
+    if (cleanEmail) {
+      const emailRegex = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
+      if (!emailRegex.test(cleanEmail)) {
+        showToast('error', 'Format email staf tidak valid.');
+        return false;
+      }
+    }
+
+    if (staffList.some((item) => item.id === nipKey || item.nipKey === nipKey)) {
+      showToast('error', `Akun dengan NIP ${cleanNip} sudah terdaftar.`);
       return false;
     }
 
+    const passwordSalt = generateSaltHex();
+    const passwordHash = await hashStaffPassword(input.password, passwordSalt);
+
+    const newStaffEntry: AuthorizedStaff = {
+      id: nipKey,
+      nip: cleanNip,
+      nipKey,
+      displayName: cleanName,
+      jabatan: cleanJabatan,
+      passwordSalt,
+      passwordHash,
+      email: cleanEmail,
+      active: true,
+      addedBy: user ? user.uid : 'temp-admin',
+    };
+
     if (!user && isTempAdmin) {
       setStaffList((prev) => {
-        const filtered = prev.filter((item) => item.id !== cleanEmail);
-        const next: AuthorizedStaff[] = [
-          ...filtered,
-          {
-            id: cleanEmail,
-            email: cleanEmail,
-            displayName: cleanName,
-            jabatan: cleanJabatan,
-            nip: cleanNip,
-            active: true,
-            addedBy: 'temp-admin',
-          },
-        ];
+        const filtered = prev.filter((item) => item.id !== nipKey);
+        const next: AuthorizedStaff[] = [...filtered, newStaffEntry];
         next.sort((a, b) => a.displayName.localeCompare(b.displayName));
+        writeLocalStaffRegistry(next);
         return next;
       });
       showToast(
         'success',
-        `Staf ${cleanEmail} ditambahkan di sesi sementara. Untuk simpan permanen ke database, masuk dengan akun Google Admin.`,
+        `Akun staf ${cleanName} (NIP. ${cleanNip}) berhasil didaftarkan.`,
       );
       return true;
     }
 
     if (!user) return false;
-    const staffPath = `authorizedStaff/${cleanEmail}`;
+    const staffPath = `authorizedStaff/${nipKey}`;
     try {
-      await setDoc(doc(db, 'authorizedStaff', cleanEmail), {
-        email: cleanEmail,
+      await setDoc(doc(db, 'authorizedStaff', nipKey), {
+        nip: cleanNip,
+        nipKey,
         displayName: cleanName,
         jabatan: cleanJabatan,
-        nip: cleanNip,
+        passwordSalt,
+        passwordHash,
+        email: cleanEmail,
         active: true,
         addedBy: user.uid,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
-      showToast('success', `Akun staf ${cleanEmail} berhasil didaftarkan.`);
+      const merged = [...readLocalStaffRegistry().filter((item) => item.id !== nipKey), newStaffEntry];
+      writeLocalStaffRegistry(merged);
+      showToast('success', `Akun staf ${cleanName} (NIP. ${cleanNip}) berhasil didaftarkan.`);
       return true;
     } catch (err) {
       handleFirestoreError(err, OperationType.CREATE, staffPath);
@@ -699,19 +898,165 @@ export default function App() {
     }
   };
 
+  const handleEditAuthorizedStaff = async (input: EditStaffInput): Promise<boolean> => {
+    if (!isAdminUser) return false;
+    const existing = staffList.find((item) => item.id === input.id);
+    if (!existing) {
+      showToast('error', 'Data akun staf yang akan diubah tidak ditemukan.');
+      return false;
+    }
+
+    const cleanNip = input.nip.trim().slice(0, STAFF_FIELD_LIMITS.nip);
+    const newNipKey = normalizeNipKey(cleanNip).slice(0, STAFF_FIELD_LIMITS.nipKey);
+    const cleanName = input.displayName.trim().slice(0, STAFF_FIELD_LIMITS.displayName);
+    const cleanJabatan = input.jabatan.trim().slice(0, STAFF_FIELD_LIMITS.jabatan);
+    const cleanEmail = input.email.trim().toLowerCase().slice(0, STAFF_FIELD_LIMITS.email);
+
+    if (!cleanNip || !newNipKey) {
+      showToast('error', 'NIP wajib diisi dengan karakter huruf atau angka yang valid.');
+      return false;
+    }
+    if (!cleanName || !cleanJabatan) {
+      showToast('error', 'Nama Lengkap dan Jabatan wajib diisi.');
+      return false;
+    }
+    if (
+      input.password &&
+      (input.password.length < STAFF_FIELD_LIMITS.passwordMin ||
+        input.password.length > STAFF_FIELD_LIMITS.passwordMax)
+    ) {
+      showToast(
+        'error',
+        `Password baru minimal terdiri dari ${STAFF_FIELD_LIMITS.passwordMin} karakter.`,
+      );
+      return false;
+    }
+    if (cleanEmail) {
+      const emailRegex = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
+      if (!emailRegex.test(cleanEmail)) {
+        showToast('error', 'Format email staf tidak valid.');
+        return false;
+      }
+    }
+
+    if (
+      newNipKey !== existing.id &&
+      staffList.some(
+        (item) => item.id !== existing.id && (item.id === newNipKey || item.nipKey === newNipKey),
+      )
+    ) {
+      showToast('error', `Akun dengan NIP ${cleanNip} sudah terdaftar pada akun lain.`);
+      return false;
+    }
+
+    let passwordSalt = existing.passwordSalt;
+    let passwordHash = existing.passwordHash;
+    if (input.password) {
+      passwordSalt = generateSaltHex();
+      passwordHash = await hashStaffPassword(input.password, passwordSalt);
+    }
+
+    const updatedEntry: AuthorizedStaff = {
+      ...existing,
+      id: newNipKey,
+      nip: cleanNip,
+      nipKey: newNipKey,
+      displayName: cleanName,
+      jabatan: cleanJabatan,
+      email: cleanEmail,
+      passwordSalt,
+      passwordHash,
+    };
+
+    if (!user && isTempAdmin) {
+      setStaffList((prev) => {
+        const next = prev.map((item) => (item.id === existing.id ? updatedEntry : item));
+        next.sort((a, b) => a.displayName.localeCompare(b.displayName));
+        writeLocalStaffRegistry(next);
+        return next;
+      });
+      showToast(
+        'success',
+        `Data akun staf ${cleanName} (NIP. ${cleanNip}) berhasil diperbarui.`,
+      );
+      return true;
+    }
+
+    if (!user) return false;
+    if (newNipKey === existing.id) {
+      const staffPath = `authorizedStaff/${existing.id}`;
+      try {
+        await updateDoc(doc(db, 'authorizedStaff', existing.id), {
+          nip: cleanNip,
+          displayName: cleanName,
+          jabatan: cleanJabatan,
+          email: cleanEmail,
+          ...(input.password ? { passwordSalt, passwordHash } : {}),
+          updatedAt: serverTimestamp(),
+        });
+        const merged = readLocalStaffRegistry().map((item) =>
+          item.id === existing.id ? updatedEntry : item,
+        );
+        writeLocalStaffRegistry(merged);
+        showToast(
+          'success',
+          `Data akun staf ${cleanName} (NIP. ${cleanNip}) berhasil diperbarui.`,
+        );
+        return true;
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, staffPath);
+        return false;
+      }
+    }
+
+    // NIP key changed: create new document and remove old one
+    const newStaffPath = `authorizedStaff/${newNipKey}`;
+    try {
+      await setDoc(doc(db, 'authorizedStaff', newNipKey), {
+        nip: cleanNip,
+        nipKey: newNipKey,
+        displayName: cleanName,
+        jabatan: cleanJabatan,
+        passwordSalt,
+        passwordHash,
+        email: cleanEmail,
+        active: existing.active,
+        addedBy: user.uid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      await deleteDoc(doc(db, 'authorizedStaff', existing.id));
+      const merged = [
+        ...readLocalStaffRegistry().filter((item) => item.id !== existing.id && item.id !== newNipKey),
+        updatedEntry,
+      ];
+      writeLocalStaffRegistry(merged);
+      showToast(
+        'success',
+        `Data akun staf ${cleanName} (NIP. ${cleanNip}) berhasil diperbarui.`,
+      );
+      return true;
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, newStaffPath);
+      return false;
+    }
+  };
+
   const handleToggleStaffActive = async (staff: AuthorizedStaff) => {
     if (!isAdminUser) return;
     if (!user && isTempAdmin) {
-      setStaffList((prev) =>
-        prev.map((item) =>
+      setStaffList((prev) => {
+        const next = prev.map((item) =>
           item.id === staff.id ? { ...item, active: !item.active } : item,
-        ),
-      );
+        );
+        writeLocalStaffRegistry(next);
+        return next;
+      });
       showToast(
         'success',
         !staff.active
-          ? `Akun ${staff.email} diaktifkan kembali (sesi sementara).`
-          : `Akun ${staff.email} dinonaktifkan (sesi sementara).`,
+          ? `Akun ${staff.displayName} (NIP. ${staff.nip}) diaktifkan kembali.`
+          : `Akun ${staff.displayName} (NIP. ${staff.nip}) dinonaktifkan.`,
       );
       return;
     }
@@ -725,8 +1070,8 @@ export default function App() {
       showToast(
         'success',
         !staff.active
-          ? `Akun ${staff.email} diaktifkan kembali.`
-          : `Akun ${staff.email} dinonaktifkan.`,
+          ? `Akun ${staff.displayName} (NIP. ${staff.nip}) diaktifkan kembali.`
+          : `Akun ${staff.displayName} (NIP. ${staff.nip}) dinonaktifkan.`,
       );
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, staffPath);
@@ -736,15 +1081,21 @@ export default function App() {
   const handleDeleteAuthorizedStaff = async (staffId: string) => {
     if (!isAdminUser) return;
     if (!user && isTempAdmin) {
-      setStaffList((prev) => prev.filter((item) => item.id !== staffId));
-      showToast('success', `Akun ${staffId} dihapus dari daftar sesi sementara.`);
+      setStaffList((prev) => {
+        const next = prev.filter((item) => item.id !== staffId);
+        writeLocalStaffRegistry(next);
+        return next;
+      });
+      showToast('success', `Akun staf ${staffId} berhasil dihapus.`);
       return;
     }
     if (!user) return;
     const staffPath = `authorizedStaff/${staffId}`;
     try {
       await deleteDoc(doc(db, 'authorizedStaff', staffId));
-      showToast('success', `Akun ${staffId} dihapus dari daftar staf terdaftar.`);
+      const nextLocal = readLocalStaffRegistry().filter((item) => item.id !== staffId);
+      writeLocalStaffRegistry(nextLocal);
+      showToast('success', `Akun staf ${staffId} dihapus dari daftar staf terdaftar.`);
     } catch (err) {
       handleFirestoreError(err, OperationType.DELETE, staffPath);
     }
@@ -782,6 +1133,14 @@ export default function App() {
         } catch (err) {
           handleFirestoreError(err, OperationType.UPDATE, profilePath);
         }
+      } else if (localStaff) {
+        const updatedStaff: AuthorizedStaff = {
+          ...localStaff,
+          displayName: cleanName,
+          jabatan: cleanInstansi || localStaff.jabatan,
+        };
+        setLocalStaff(updatedStaff);
+        writeActiveStaffSession(updatedStaff);
       }
 
       setProfileName(cleanName);
@@ -800,6 +1159,11 @@ export default function App() {
     setReport((prev) => ({
       ...prev,
       [field]: value,
+      ...(field === 'namaKabupaten' ||
+      field === 'namaKecamatan' ||
+      field === 'alamatKecamatan'
+        ? { kopBannerDataUrl: '' }
+        : {}),
     }));
   };
 
@@ -882,6 +1246,9 @@ export default function App() {
         namaCamat: extracted.namaCamat || prev.namaCamat,
         nipCamat: extracted.nipCamat || prev.nipCamat,
         pangkatCamat: extracted.pangkatCamat || prev.pangkatCamat,
+        logoDataUrl: typeof extracted.logoDataUrl === 'string' ? extracted.logoDataUrl : '',
+        kopBannerDataUrl:
+          typeof extracted.kopBannerDataUrl === 'string' ? extracted.kopBannerDataUrl : '',
       };
     });
     setShowRequiredErrors(false);
@@ -892,6 +1259,8 @@ export default function App() {
   const handleFillDemoData = () => {
     setReport({
       ...SAMPLE_FULL_REPORT,
+      logoDataUrl: SAMPLE_FULL_REPORT.logoDataUrl || '',
+      kopBannerDataUrl: SAMPLE_FULL_REPORT.kopBannerDataUrl || '',
       photos: SAMPLE_FULL_REPORT.photos.map((p) => ({ ...p })),
     });
     setIsUnlocked(false);
@@ -921,10 +1290,12 @@ export default function App() {
       return;
     }
 
-    if (!user && isTempAdmin) {
+    if (!user && hasLocalSession) {
+      const localOwner = localStaff ? localStaff.nipKey : 'temp-admin';
+      const storageScope = localStaff ? localStaff.nipKey : undefined;
       const sanitizedLocal = sanitizeReportForFirestore(
         { ...report, status: 'draft' },
-        'temp-admin',
+        localOwner,
       );
       const targetId =
         activeReportId ||
@@ -935,7 +1306,7 @@ export default function App() {
       };
       setSavedReports((prev) => {
         const next = [entry, ...prev.filter((r) => r.id !== targetId)];
-        writeLocalReports(next);
+        writeLocalReports(next, storageScope);
         return next;
       });
       setActiveReportId(targetId);
@@ -943,8 +1314,8 @@ export default function App() {
       showToast(
         'success',
         activeReportId
-          ? 'Perubahan laporan diperbarui di arsip lokal sesi Admin.'
-          : 'Laporan baru tersimpan di arsip lokal sesi Admin.',
+          ? 'Perubahan laporan diperbarui di arsip lokal sesi Anda.'
+          : 'Laporan baru tersimpan di arsip lokal sesi Anda.',
       );
       return;
     }
@@ -1007,6 +1378,8 @@ export default function App() {
     const { id, ownerId: _owner, createdAt: _c, updatedAt: _u, ...data } = stored;
     setReport({
       ...data,
+      logoDataUrl: data.logoDataUrl || '',
+      kopBannerDataUrl: data.kopBannerDataUrl || '',
       photos: (data.photos || []).map((p) => ({ ...p })),
     });
     setActiveReportId(id);
@@ -1019,12 +1392,13 @@ export default function App() {
   const handleToggleArchiveStatus = async (stored: StoredTravelReport) => {
     const nextStatus: StoredTravelReport['status'] =
       stored.status === 'final' ? 'draft' : 'final';
-    if (!user && isTempAdmin) {
+    if (!user && hasLocalSession) {
+      const storageScope = localStaff ? localStaff.nipKey : undefined;
       setSavedReports((prev) => {
         const next = prev.map((item) =>
           item.id === stored.id ? { ...item, status: nextStatus } : item,
         );
-        writeLocalReports(next);
+        writeLocalReports(next, storageScope);
         return next;
       });
       if (activeReportId === stored.id) {
@@ -1064,10 +1438,11 @@ export default function App() {
   };
 
   const handleDeleteArchive = async (reportId: string) => {
-    if (!user && isTempAdmin) {
+    if (!user && hasLocalSession) {
+      const storageScope = localStaff ? localStaff.nipKey : undefined;
       setSavedReports((prev) => {
         const next = prev.filter((item) => item.id !== reportId);
-        writeLocalReports(next);
+        writeLocalReports(next, storageScope);
         return next;
       });
       if (activeReportId === reportId) {
@@ -1169,7 +1544,7 @@ export default function App() {
       : []),
   ];
 
-  if (!isTempAdmin && (!authReady || isCheckingAccess)) {
+  if (!hasLocalSession && (!authReady || isCheckingAccess)) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-[#F4F6F9] text-[#0F172A] px-6">
         <div className="flex items-center gap-3 mb-4">
@@ -1194,7 +1569,7 @@ export default function App() {
     );
   }
 
-  if (!isTempAdmin && (!user || !accessGranted || needsEmailVerification)) {
+  if (!hasLocalSession && (!user || !accessGranted || needsEmailVerification)) {
     return (
       <LoginPage
         onLoginWithEmail={handleLoginWithEmail}
@@ -1281,7 +1656,7 @@ export default function App() {
                     {item.icon}
                     <span>{item.label}</span>
                   </span>
-                  {item.id === 'archive' && (user || isTempAdmin) && savedReports.length > 0 && (
+                  {item.id === 'archive' && (user || hasLocalSession) && savedReports.length > 0 && (
                     <span
                       className={`text-xs tabular-nums ${
                         isActive ? 'text-[#0F2A56]' : 'text-slate-300'
@@ -1303,9 +1678,10 @@ export default function App() {
               <p className="text-xs font-semibold text-white truncate">
                 {profileName}
               </p>
-              {(user?.email || isTempAdmin) && (
+              {(user?.email || isTempAdmin || localStaff) && (
                 <p className="text-[11px] text-slate-300 truncate mt-0.5">
-                  {user?.email || 'Akses Sementara (admin)'}
+                  {user?.email ||
+                    (localStaff ? `NIP. ${localStaff.nip}` : 'Akses Sementara (admin)')}
                 </p>
               )}
             </div>
@@ -1405,7 +1781,7 @@ export default function App() {
                     {profileName}
                   </p>
                   <p className="text-[11px] text-[#64748B] truncate mt-0.5">
-                    {user?.email || profileInstansi}
+                    {user?.email || (localStaff ? `NIP. ${localStaff.nip}` : profileInstansi)}
                   </p>
                 </div>
 
@@ -1576,17 +1952,84 @@ export default function App() {
 
               {/* Right Column: Official A4 Document Live Preview */}
               <div className="w-full xl:w-[56%]">
-                <div className="no-print flex items-center justify-between mb-3 px-1">
-                  <div className="text-xs font-semibold text-[#334155]">
-                    Live Preview Dokumen Resmi (Kertas A4)
+                <div className="no-print flex flex-wrap items-center justify-between gap-2.5 mb-3 px-1">
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-[#334155]">
+                      Live Preview Dokumen Resmi (Kertas A4)
+                    </div>
+                    <div className="text-[11px] text-[#64748B]">
+                      2 Halaman · Kop Surat Kecamatan + Lampiran Dokumentasi ({report.photos.length}/4)
+                    </div>
                   </div>
-                  <div className="text-xs text-[#64748B]">
-                    2 Halaman · Kop Surat Kecamatan + Lampiran Dokumentasi ({report.photos.length}/4)
+
+                  {/* Zoom Controls */}
+                  <div
+                    role="group"
+                    aria-label="Kontrol zoom pratinjau dokumen"
+                    className="inline-flex items-center bg-white border border-[#CBD5E1] rounded-md overflow-hidden shrink-0"
+                  >
+                    <button
+                      type="button"
+                      onClick={handleZoomOut}
+                      disabled={previewZoom <= 0.5}
+                      aria-label="Perkecil pratinjau dokumen (Zoom Out)"
+                      title="Perkecil (Zoom Out)"
+                      className="px-2.5 py-1.5 text-[#334155] hover:bg-[#F1F5F9] hover:text-[#0F2A56] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      <ZoomOut className="w-3.5 h-3.5" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleResetZoom}
+                      title="Klik untuk reset zoom ke 100%"
+                      aria-label={`Tingkat zoom ${Math.round(previewZoom * 100)} persen, klik untuk reset ke 100%`}
+                      className="px-2.5 py-1.5 min-w-[54px] text-center text-xs font-semibold font-mono-tabular text-[#0F172A] border-x border-[#E2E8F0] hover:bg-[#EFF6FF] hover:text-[#0F2A56] transition-colors"
+                    >
+                      {Math.round(previewZoom * 100)}%
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleZoomIn}
+                      disabled={previewZoom >= 1.75}
+                      aria-label="Perbesar pratinjau dokumen (Zoom In)"
+                      title="Perbesar (Zoom In)"
+                      className="px-2.5 py-1.5 text-[#334155] hover:bg-[#F1F5F9] hover:text-[#0F2A56] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      <ZoomIn className="w-3.5 h-3.5" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleFitPreviewWidth}
+                      title="Sesuaikan lebar kertas A4 ke panel pratinjau"
+                      className="px-2.5 py-1.5 text-[11px] font-medium text-[#0F2A56] bg-[#F8FAFC] border-l border-[#E2E8F0] hover:bg-[#EFF6FF] transition-colors whitespace-nowrap"
+                    >
+                      Pas Lebar
+                    </button>
                   </div>
                 </div>
 
-                <div className="a4-sheet-wrapper bg-[#E2E8F0] border border-[#CBD5E1] rounded-lg p-4 md:p-6 xl:max-h-[calc(100vh-190px)] xl:overflow-y-auto print:bg-white print:border-none print:p-0 print:max-h-none print:overflow-visible">
-                  <A4Preview report={report} />
+                <div
+                  ref={previewWrapperRef}
+                  className="a4-sheet-wrapper bg-[#E2E8F0] border border-[#CBD5E1] rounded-lg p-4 md:p-6 xl:max-h-[calc(100vh-190px)] overflow-auto print:bg-white print:border-none print:p-0 print:max-h-none print:overflow-visible"
+                >
+                  <div
+                    className="preview-zoom-box mx-auto"
+                    style={{
+                      width: previewSize.width ? `${previewSize.width * previewZoom}px` : undefined,
+                      height: previewSize.height ? `${previewSize.height * previewZoom}px` : undefined,
+                    }}
+                  >
+                    <div
+                      ref={previewContentRef}
+                      className="preview-zoom-stage origin-top-left w-fit"
+                      style={{ transform: `scale(${previewZoom})` }}
+                    >
+                      <A4Preview report={report} />
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1595,8 +2038,12 @@ export default function App() {
           {activeTab === 'archive' && (
             <ArchivePanel
               user={user}
-              authReady={authReady || isTempAdmin}
+              authReady={authReady || hasLocalSession}
               isTempAdmin={isTempAdmin}
+              hasLocalSession={hasLocalSession}
+              localAccountLabel={
+                localStaff ? `${localStaff.displayName} (NIP. ${localStaff.nip})` : undefined
+              }
               reports={savedReports}
               loadingReports={loadingReports}
               activeReportId={activeReportId}
@@ -1619,6 +2066,7 @@ export default function App() {
               loadingStaff={loadingStaff}
               adminEmail={ADMIN_EMAIL}
               onAddStaff={handleAddAuthorizedStaff}
+              onEditStaff={handleEditAuthorizedStaff}
               onToggleStaffActive={handleToggleStaffActive}
               onDeleteStaff={handleDeleteAuthorizedStaff}
             />

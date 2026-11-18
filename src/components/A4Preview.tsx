@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ImageOff } from 'lucide-react';
+import { buildPendahuluanDasarItems } from '../lib/dasarUtils';
 import { TravelReportData } from '../types/report';
 import { OfficialEmblem } from './OfficialEmblem';
 
@@ -40,17 +41,21 @@ const PhotoPreviewCard: React.FC<{
   );
 };
 
-const KopLogo: React.FC = () => {
+const KopLogo: React.FC<{ logoDataUrl?: string }> = ({ logoDataUrl }) => {
   const [imgError, setImgError] = useState(false);
 
-  if (imgError) {
+  useEffect(() => {
+    setImgError(false);
+  }, [logoDataUrl]);
+
+  if (!logoDataUrl || imgError) {
     return <OfficialEmblem className="w-[64px] h-[72px]" />;
   }
 
   return (
     <img
-      src="/assets/aistudio/image_08502736.png"
-      alt="Logo Resmi Instansi"
+      src={logoDataUrl}
+      alt="Logo Instansi Hasil Scan SPT"
       referrerPolicy="no-referrer"
       onError={() => setImgError(true)}
       className="w-[68px] h-[68px] object-contain"
@@ -59,6 +64,12 @@ const KopLogo: React.FC = () => {
 };
 
 export const A4Preview: React.FC<A4PreviewProps> = ({ report }) => {
+  const [kopBannerError, setKopBannerError] = useState(false);
+
+  useEffect(() => {
+    setKopBannerError(false);
+  }, [report.kopBannerDataUrl]);
+
   const kecamatanShort =
     (report.namaKecamatan || '').replace(/^kecamatan\s+/i, '').trim() || 'Kecamatan';
 
@@ -74,29 +85,45 @@ export const A4Preview: React.FC<A4PreviewProps> = ({ report }) => {
     ));
   };
 
+  const hasValidKopBanner = Boolean(report.kopBannerDataUrl) && !kopBannerError;
+
   return (
     <div id="a4-print-area" className="print-only-container flex flex-col items-center gap-8">
       {/* Halaman 1: Kop Surat & Batang Tubuh I - VII */}
       <article className="a4-sheet font-official-doc text-[11pt] text-[#0F172A]">
         {/* Kop Surat Resmi */}
-        <header className="grid grid-cols-[74px_1fr_74px] items-center gap-3 pb-3 border-b-[3px] border-double border-slate-950">
-          <div className="flex items-center justify-center">
-            <KopLogo />
-          </div>
-          <div className="text-center">
-            <p className="text-[12pt] font-bold tracking-wide uppercase leading-tight">
-              {report.namaKabupaten || 'PEMERINTAH KABUPATEN'}
-            </p>
-            <h1 className="text-[15.5pt] font-bold tracking-wider uppercase leading-tight mt-0.5">
-              {report.namaKecamatan || 'KECAMATAN'}
-            </h1>
-            <p className="text-[9pt] text-slate-700 leading-snug mt-1">
-              {report.alamatKecamatan || 'Alamat Kantor Kecamatan'}
-            </p>
-          </div>
-          <div aria-hidden="true" />
-        </header>
-        <div className="border-b border-slate-950 mt-[2px] mb-5" />
+        {hasValidKopBanner ? (
+          <header className="mb-5">
+            <img
+              src={report.kopBannerDataUrl}
+              alt="Kop Surat Resmi Instansi"
+              referrerPolicy="no-referrer"
+              onError={() => setKopBannerError(true)}
+              className="w-full h-auto block object-contain"
+            />
+          </header>
+        ) : (
+          <>
+            <header className="grid grid-cols-[74px_1fr_74px] items-center gap-3 pb-3 border-b-[3px] border-double border-slate-950">
+              <div className="flex items-center justify-center">
+                <KopLogo logoDataUrl={report.logoDataUrl} />
+              </div>
+              <div className="text-center">
+                <p className="text-[12pt] font-bold tracking-wide uppercase leading-tight whitespace-pre-line">
+                  {report.namaKabupaten || 'PEMERINTAH KABUPATEN'}
+                </p>
+                <h1 className="text-[15.5pt] font-bold tracking-wider uppercase leading-tight mt-0.5 whitespace-pre-line">
+                  {report.namaKecamatan || 'KECAMATAN'}
+                </h1>
+                <p className="text-[9pt] text-slate-700 leading-snug mt-1 whitespace-pre-line">
+                  {report.alamatKecamatan || 'Alamat Kantor Kecamatan'}
+                </p>
+              </div>
+              <div aria-hidden="true" />
+            </header>
+            <div className="border-b border-slate-950 mt-[2px] mb-5" />
+          </>
+        )}
 
         {/* Judul Dokumen */}
         <div className="text-center mb-6">
@@ -112,18 +139,37 @@ export const A4Preview: React.FC<A4PreviewProps> = ({ report }) => {
         {/* Batang Tubuh I s.d. VII */}
         <div className="space-y-4 text-[10.8pt]">
           {/* I. PENDAHULUAN / DASAR */}
-          <section>
-            <h3 className="font-bold uppercase tracking-tight mb-1">
-              I. PENDAHULUAN / DASAR
-            </h3>
-            <div className="pl-6 space-y-1.5">
-              <p className="font-semibold text-justify leading-[1.55]">
-                Surat Perintah Tugas (SPT) Nomor {report.nomorSpt || '-'} tanggal{' '}
-                {report.tanggalSpt || '-'}.
-              </p>
-              {renderLines(report.dasarHukum)}
-            </div>
-          </section>
+          {(() => {
+            const { items: dasarItems, useNumbering } = buildPendahuluanDasarItems(report);
+            return (
+              <section>
+                <h3 className="font-bold uppercase tracking-tight mb-1">
+                  I. PENDAHULUAN / DASAR
+                </h3>
+                <div className="pl-6 space-y-1.5 font-normal not-italic no-underline">
+                  {useNumbering ? (
+                    <ol className="space-y-1.5 list-none m-0 p-0">
+                      {dasarItems.map((item, idx) => (
+                        <li
+                          key={idx}
+                          className="flex items-start gap-2 text-justify leading-[1.55] font-normal not-italic no-underline"
+                        >
+                          <span className="shrink-0 tabular-nums min-w-[1.25rem]">
+                            {idx + 1}.
+                          </span>
+                          <span className="flex-1">{item}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : (
+                    <p className="text-justify leading-[1.55] font-normal not-italic no-underline">
+                      {dasarItems[0]}
+                    </p>
+                  )}
+                </div>
+              </section>
+            );
+          })()}
 
           {/* II. MAKSUD DAN TUJUAN */}
           <section>
@@ -229,20 +275,9 @@ export const A4Preview: React.FC<A4PreviewProps> = ({ report }) => {
           </section>
         </div>
 
-        {/* Blok Tanggal & Tanda Tangan Pejabat */}
-        <footer className="mt-10 grid grid-cols-2 gap-8 text-[10.5pt] break-inside-avoid">
-          <div className="text-center">
-            <p>Mengetahui,</p>
-            <p className="font-bold">Camat {kecamatanShort}</p>
-            <div className="h-20" />
-            <p className="font-bold underline underline-offset-2">
-              {report.namaCamat || '........................................'}
-            </p>
-            {report.pangkatCamat && <p className="text-[9.8pt]">{report.pangkatCamat}</p>}
-            <p className="text-[9.8pt] tabular-nums">NIP. {report.nipCamat || '-'}</p>
-          </div>
-
-          <div className="text-center">
+        {/* Blok Tanggal & Tanda Tangan Pelaksana */}
+        <footer className="mt-10 flex justify-end text-[10.5pt] break-inside-avoid">
+          <div className="w-1/2 text-center">
             <p>
               {report.tempatLaporan || kecamatanShort},{' '}
               {report.tanggalLaporan || report.tanggalSpt || '....................'}

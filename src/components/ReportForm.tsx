@@ -8,14 +8,21 @@ import {
   ImagePlus,
   Loader2,
   Lock,
+  RotateCcw,
   Sparkles,
   Trash2,
   Unlock,
   UploadCloud,
 } from 'lucide-react';
 import { compressImageFile } from '../lib/imageUtils';
+import {
+  extractKopBannerFromCanvas,
+  extractKopLogoFromCanvas,
+  preparePdfForExtraction,
+} from '../lib/pdfLogoScanner';
 import { SAMPLE_SPT_EXTRACTED } from '../lib/sampleData';
 import { REPORT_FIELD_LIMITS, ReportPhoto, TravelReportData } from '../types/report';
+import { OfficialEmblem } from './OfficialEmblem';
 
 interface ReportFormProps {
   report: TravelReportData;
@@ -75,28 +82,43 @@ export const ReportForm: React.FC<ReportFormProps> = ({
     setExtractStatus(null);
 
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 40000);
+    const timeoutId = window.setTimeout(() => controller.abort(), 90000);
 
     try {
-      const base64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onerror = () => reject(new Error('Gagal membaca file PDF.'));
-        reader.onload = () => resolve(String(reader.result || ''));
-        reader.readAsDataURL(file);
-      });
+      const prepared = await preparePdfForExtraction(file);
+      const hasPreparedPayload =
+        prepared.extractedText.trim().length >= 80 ||
+        prepared.pageImagesBase64.length > 0;
+
+      const fallbackPdfBase64 = !hasPreparedPayload
+        ? await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(new Error('Gagal membaca file PDF.'));
+            reader.onload = () => resolve(String(reader.result || ''));
+            reader.readAsDataURL(file);
+          })
+        : '';
 
       const response = await fetch('/api/extract-spt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
         body: JSON.stringify({
-          pdfBase64: base64,
           fileName: file.name,
+          extractedText: prepared.extractedText,
+          kopImageBase64: prepared.kopImageBase64,
+          pageImagesBase64: prepared.pageImagesBase64,
+          ...(fallbackPdfBase64 ? { pdfBase64: fallbackPdfBase64 } : {}),
         }),
       });
 
       const rawText = await response.text();
-      let payload: { extracted?: Partial<TravelReportData>; error?: string } = {};
+      type ExtractedSptResponse = Partial<TravelReportData> & {
+        hasKopLogo?: boolean;
+        logoBox?: number[];
+        kopBox?: number[];
+      };
+      let payload: { extracted?: ExtractedSptResponse; error?: string } = {};
       try {
         payload = rawText ? (JSON.parse(rawText) as typeof payload) : {};
       } catch {
@@ -137,16 +159,53 @@ export const ReportForm: React.FC<ReportFormProps> = ({
         );
       }
 
-      const extracted = payload.extracted;
-      onApplyExtractedSpt(extracted, file.name);
+      let scannedLogoDataUrl = '';
+      try {
+        scannedLogoDataUrl = extractKopLogoFromCanvas(prepared.page1Canvas, {
+          logoBox: payload.extracted.logoBox,
+          logoBoxScope: prepared.logoBoxScope,
+          hasKopLogo: payload.extracted.hasKopLogo,
+        });
+      } catch {
+        scannedLogoDataUrl = '';
+      }
+
+      let scannedKopBannerDataUrl = '';
+      try {
+        scannedKopBannerDataUrl = extractKopBannerFromCanvas(prepared.page1Canvas, {
+          kopBox: payload.extracted.kopBox,
+          logoBoxScope: prepared.logoBoxScope,
+        });
+      } catch {
+        scannedKopBannerDataUrl = '';
+      }
+
+      const {
+        hasKopLogo: _hasKopLogo,
+        logoBox: _logoBox,
+        kopBox: _kopBox,
+        ...extractedFields
+      } = payload.extracted;
+      onApplyExtractedSpt(
+        {
+          ...extractedFields,
+          logoDataUrl: scannedLogoDataUrl,
+          kopBannerDataUrl: scannedKopBannerDataUrl,
+        },
+        file.name,
+      );
       setExtractStatus({
         type: 'success',
-        message: `Ekstraksi otomatis dari "${file.name}" berhasil termasuk draf V. Hasil Pelaksanaan Kegiatan & VI. Kesimpulan dan Saran (maks. 1 baris A4). Kolom dikunci otomatis — klik "Ubah Data" untuk menyunting.`,
+        message: scannedKopBannerDataUrl
+          ? `Ekstraksi otomatis & scanning format Kop Surat asli dari "${file.name}" berhasil termasuk draf V. Hasil Pelaksanaan Kegiatan & VI. Kesimpulan dan Saran (maks. 1 baris A4). Kolom dikunci otomatis — klik "Ubah Data" untuk menyunting.`
+          : scannedLogoDataUrl
+            ? `Ekstraksi otomatis & scanning logo instansi dari "${file.name}" berhasil termasuk draf V. Hasil Pelaksanaan Kegiatan & VI. Kesimpulan dan Saran (maks. 1 baris A4). Kolom dikunci otomatis — klik "Ubah Data" untuk menyunting.`
+            : `Ekstraksi otomatis dari "${file.name}" berhasil (menggunakan logo instansi default) termasuk draf V. Hasil Pelaksanaan Kegiatan & VI. Kesimpulan dan Saran (maks. 1 baris A4). Kolom dikunci otomatis — klik "Ubah Data" untuk menyunting.`,
       });
     } catch (err) {
       const isAbort = err instanceof DOMException && err.name === 'AbortError';
       const msg = isAbort
-        ? 'Waktu tunggu ekstraksi habis (melebihi 40 detik) karena koneksi atau server AI padat.'
+        ? 'Waktu tunggu ekstraksi habis (melebihi 90 detik) karena koneksi atau server AI padat.'
         : err instanceof Error
           ? err.message
           : 'Gagal memproses file PDF.';
@@ -366,12 +425,134 @@ export const ReportForm: React.FC<ReportFormProps> = ({
         )}
       </section>
 
-      {/* 02. Variabel Ekstraksi SPT & Status Kunci */}
+      {/* 02. Unggah Foto Dokumentasi (Maksimal 4 Foto) */}
+      <section
+        id="section-foto-dokumentasi"
+        className={`bg-white border rounded-lg p-5 transition-colors ${
+          showRequiredErrors && report.photos.length === 0
+            ? 'border-[#DC2626]'
+            : 'border-[#D8E0EB]'
+        }`}
+      >
+        <div className="flex items-start justify-between gap-4 mb-3">
+          <div>
+            <h2 className="text-base font-semibold text-[#0F172A]">
+              02. Foto Dokumentasi Kegiatan
+              <span className="text-[#DC2626] font-bold ml-1" aria-hidden="true">*</span>
+            </h2>
+            <p className="text-xs text-[#475569] mt-0.5">
+              Format JPG atau PNG · Minimal 1 dan maksimal 4 foto untuk galeri Lampiran A4.
+            </p>
+          </div>
+          <div className="text-right shrink-0">
+            <span className="block text-xs font-semibold text-[#0F2A56] tabular-nums whitespace-nowrap">
+              {report.photos.length} / {REPORT_FIELD_LIMITS.maxPhotos} Foto
+            </span>
+            <span className="block text-[11px] font-medium text-[#DC2626] whitespace-nowrap">
+              * Wajib diisi
+            </span>
+          </div>
+        </div>
+
+        <input
+          ref={photoInputRef}
+          type="file"
+          accept="image/jpeg,image/png"
+          multiple
+          className="hidden"
+          onChange={(e) => handlePhotoSelect(e.target.files)}
+        />
+
+        <button
+          type="button"
+          disabled={isProcessingPhoto || report.photos.length >= REPORT_FIELD_LIMITS.maxPhotos}
+          onClick={() => photoInputRef.current?.click()}
+          className={`w-full border border-dashed rounded-md py-4 px-4 flex items-center justify-center gap-2.5 text-sm font-medium text-[#0F2A56] hover:border-[#0F2A56] hover:bg-[#EFF6FF]/60 disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${
+            showRequiredErrors && report.photos.length === 0
+              ? 'border-[#DC2626] bg-[#FEF2F2]/50'
+              : 'border-[#94A3B8] bg-[#F8FAFC]'
+          }`}
+        >
+          {isProcessingPhoto ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin" />
+              Memproses & Mengompres Foto...
+            </>
+          ) : report.photos.length >= REPORT_FIELD_LIMITS.maxPhotos ? (
+            <>Maksimal 4 Foto Tercapai</>
+          ) : (
+            <>
+              <ImagePlus className="w-4 h-4" />
+              Unggah Foto Dokumentasi (JPG/PNG)
+            </>
+          )}
+        </button>
+
+        {showRequiredErrors && report.photos.length === 0 && (
+          <p className="text-[11px] text-[#DC2626] mt-2">
+            Kolom 02. Foto Dokumentasi Kegiatan wajib diisi (unggah minimal 1 foto).
+          </p>
+        )}
+
+        {photoError && (
+          <div
+            role="alert"
+            className="mt-3 flex items-start gap-2 rounded-md border border-[#FECACA] bg-[#FEF2F2] px-3 py-2 text-xs text-[#991B1B]"
+          >
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>{photoError}</span>
+          </div>
+        )}
+
+        {report.photos.length > 0 && (
+          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {report.photos.map((photo, index) => (
+              <div
+                key={photo.id}
+                className="border border-[#E2E8F0] rounded-md p-2.5 bg-[#F8FAFC] flex flex-col gap-2"
+              >
+                <div className="relative aspect-[4/3] rounded overflow-hidden bg-slate-200 border border-[#E2E8F0]">
+                  <img
+                    src={photo.dataUrl}
+                    alt={photo.caption || `Foto dokumentasi ${index + 1}`}
+                    referrerPolicy="no-referrer"
+                    className="w-full h-full object-cover"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleRemovePhoto(photo.id)}
+                    aria-label={`Hapus foto ${index + 1}`}
+                    className="absolute top-1.5 right-1.5 inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold bg-[#DC2626] text-white rounded hover:bg-[#B91C1C] transition-colors"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    Hapus
+                  </button>
+                </div>
+
+                <div className="text-[11px] text-[#64748B] truncate">
+                  Foto {index + 1} · {photo.name}
+                </div>
+
+                <input
+                  type="text"
+                  maxLength={REPORT_FIELD_LIMITS.photoCaption}
+                  value={photo.caption}
+                  onChange={(e) => handlePhotoCaptionChange(photo.id, e.target.value)}
+                  placeholder="Keterangan singkat foto..."
+                  className="w-full rounded border border-[#CBD5E1] bg-white px-2.5 py-1.5 text-xs text-[#0F172A] focus:border-[#0F2A56] focus:outline-none"
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* 03. Variabel Ekstraksi SPT & Status Kunci */}
       <section className="bg-white border border-[#D8E0EB] rounded-lg p-5">
         <div className="flex flex-wrap items-center justify-between gap-3 pb-3 mb-4 border-b border-[#E2E8F0]">
           <div>
             <h2 className="text-base font-semibold text-[#0F172A]">
-              02. Data Surat Perintah Tugas & Pelaksana
+              03. Data Surat Perintah Tugas & Pelaksana
             </h2>
             <p className="text-xs text-[#475569] mt-0.5">
               {isUnlocked
@@ -588,7 +769,7 @@ export const ReportForm: React.FC<ReportFormProps> = ({
             onClick={() => setShowInstansiSection((prev) => !prev)}
             className="w-full flex items-center justify-between text-xs font-semibold text-[#0F2A56] py-1 hover:text-[#1E3A8A]"
           >
-            <span>Pengaturan Kop Surat Kecamatan & Pejabat Penandatangan</span>
+            <span>Pengaturan Kop Surat Kecamatan & Tanggal Laporan</span>
             {showInstansiSection ? (
               <ChevronUp className="w-4 h-4" />
             ) : (
@@ -598,6 +779,72 @@ export const ReportForm: React.FC<ReportFormProps> = ({
 
           {showInstansiSection && (
             <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+              {report.kopBannerDataUrl ? (
+                <div className="sm:col-span-2 rounded-md border border-[#BFDBFE] bg-[#EFF6FF]/60 p-3 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-xs font-semibold text-[#0F172A]">
+                        Format Kop Surat Resmi (Hasil Scan SPT.PDF)
+                      </p>
+                      <p className="text-[11px] text-[#475569]">
+                        Tampilan Kop Surat pada pratinjau A4, DOCX, dan PDF mengikuti format asli SPT yang diunggah.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onChangeField('kopBannerDataUrl', '')}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-semibold text-[#0F2A56] bg-white border border-[#CBD5E1] rounded hover:bg-[#F8FAFC] transition-colors whitespace-nowrap shrink-0"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      Gunakan Kop Teks Manual
+                    </button>
+                  </div>
+                  <div className="rounded border border-[#CBD5E1] bg-white p-2 overflow-hidden">
+                    <img
+                      src={report.kopBannerDataUrl}
+                      alt="Pratinjau Kop Surat Hasil Scan SPT"
+                      className="w-full h-auto max-h-28 object-contain mx-auto"
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="sm:col-span-2 flex items-center justify-between gap-3 rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-11 h-11 rounded border border-[#CBD5E1] bg-white flex items-center justify-center shrink-0 overflow-hidden p-1">
+                      {report.logoDataUrl ? (
+                        <img
+                          src={report.logoDataUrl}
+                          alt="Logo Kop Surat Hasil Scan"
+                          className="w-full h-full object-contain"
+                        />
+                      ) : (
+                        <OfficialEmblem className="w-8 h-9" />
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-[#0F172A] truncate">
+                        {report.logoDataUrl ? 'Logo Kop Surat (Hasil Scan SPT.PDF)' : 'Logo Instansi Default'}
+                      </p>
+                      <p className="text-[11px] text-[#64748B]">
+                        {report.logoDataUrl
+                          ? 'Otomatis dipindai dari Kop Surat halaman 1 SPT.PDF.'
+                          : 'Menggunakan lambang resmi bawaan sistem pada Kertas A4.'}
+                      </p>
+                    </div>
+                  </div>
+                  {report.logoDataUrl && (
+                    <button
+                      type="button"
+                      onClick={() => onChangeField('logoDataUrl', '')}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-semibold text-[#0F2A56] bg-white border border-[#CBD5E1] rounded hover:bg-[#EFF6FF] transition-colors whitespace-nowrap shrink-0"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      Kembalikan Logo Default
+                    </button>
+                  )}
+                </div>
+              )}
+
               <div>
                 <label htmlFor="namaKabupaten" className="block text-xs font-medium text-[#334155] mb-1">
                   Nama Pemerintah Kabupaten/Kota
@@ -632,9 +879,9 @@ export const ReportForm: React.FC<ReportFormProps> = ({
                 <label htmlFor="alamatKecamatan" className="block text-xs font-medium text-[#334155] mb-1">
                   Alamat & Kontak Kantor Kecamatan
                 </label>
-                <input
+                <textarea
                   id="alamatKecamatan"
-                  type="text"
+                  rows={2}
                   disabled={!isUnlocked}
                   maxLength={REPORT_FIELD_LIMITS.alamatKecamatan}
                   value={report.alamatKecamatan}
@@ -673,62 +920,17 @@ export const ReportForm: React.FC<ReportFormProps> = ({
                   className={inputBaseClass}
                 />
               </div>
-
-              <div>
-                <label htmlFor="namaCamat" className="block text-xs font-medium text-[#334155] mb-1">
-                  Nama Camat (Mengetahui)
-                </label>
-                <input
-                  id="namaCamat"
-                  type="text"
-                  disabled={!isUnlocked}
-                  maxLength={REPORT_FIELD_LIMITS.namaCamat}
-                  value={report.namaCamat}
-                  onChange={(e) => onChangeField('namaCamat', e.target.value)}
-                  className={inputBaseClass}
-                />
-              </div>
-
-              <div>
-                <label htmlFor="nipCamat" className="block text-xs font-medium text-[#334155] mb-1">
-                  NIP Camat
-                </label>
-                <input
-                  id="nipCamat"
-                  type="text"
-                  disabled={!isUnlocked}
-                  maxLength={REPORT_FIELD_LIMITS.nipCamat}
-                  value={report.nipCamat}
-                  onChange={(e) => onChangeField('nipCamat', e.target.value)}
-                  className={`${inputBaseClass} font-mono-tabular`}
-                />
-              </div>
-
-              <div className="sm:col-span-2">
-                <label htmlFor="pangkatCamat" className="block text-xs font-medium text-[#334155] mb-1">
-                  Pangkat / Golongan Camat
-                </label>
-                <input
-                  id="pangkatCamat"
-                  type="text"
-                  disabled={!isUnlocked}
-                  maxLength={REPORT_FIELD_LIMITS.pangkatCamat}
-                  value={report.pangkatCamat}
-                  onChange={(e) => onChangeField('pangkatCamat', e.target.value)}
-                  className={inputBaseClass}
-                />
-              </div>
             </div>
           )}
         </div>
       </section>
 
-      {/* 03. Isi Laporan Pelaksanaan (Romawi V - VII) */}
+      {/* 04. Isi Laporan Pelaksanaan (Romawi V - VII) */}
       <section className="bg-white border border-[#D8E0EB] rounded-lg p-5">
         <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
           <div>
             <h2 className="text-base font-semibold text-[#0F172A]">
-              03. Uraian Hasil & Penutup (Romawi V – VII)
+              04. Uraian Hasil & Penutup (Romawi V – VII)
             </h2>
             <p className="text-xs text-[#475569] mt-0.5">
               {isUnlocked
@@ -815,127 +1017,6 @@ export const ReportForm: React.FC<ReportFormProps> = ({
         </div>
       </section>
 
-      {/* 04. Unggah Foto Dokumentasi (Maksimal 4 Foto) */}
-      <section
-        id="section-foto-dokumentasi"
-        className={`bg-white border rounded-lg p-5 transition-colors ${
-          showRequiredErrors && report.photos.length === 0
-            ? 'border-[#DC2626]'
-            : 'border-[#D8E0EB]'
-        }`}
-      >
-        <div className="flex items-start justify-between gap-4 mb-3">
-          <div>
-            <h2 className="text-base font-semibold text-[#0F172A]">
-              04. Foto Dokumentasi Kegiatan
-              <span className="text-[#DC2626] font-bold ml-1" aria-hidden="true">*</span>
-            </h2>
-            <p className="text-xs text-[#475569] mt-0.5">
-              Format JPG atau PNG · Minimal 1 dan maksimal 4 foto untuk galeri Lampiran A4.
-            </p>
-          </div>
-          <div className="text-right shrink-0">
-            <span className="block text-xs font-semibold text-[#0F2A56] tabular-nums whitespace-nowrap">
-              {report.photos.length} / {REPORT_FIELD_LIMITS.maxPhotos} Foto
-            </span>
-            <span className="block text-[11px] font-medium text-[#DC2626] whitespace-nowrap">
-              * Wajib diisi
-            </span>
-          </div>
-        </div>
-
-        <input
-          ref={photoInputRef}
-          type="file"
-          accept="image/jpeg,image/png"
-          multiple
-          className="hidden"
-          onChange={(e) => handlePhotoSelect(e.target.files)}
-        />
-
-        <button
-          type="button"
-          disabled={isProcessingPhoto || report.photos.length >= REPORT_FIELD_LIMITS.maxPhotos}
-          onClick={() => photoInputRef.current?.click()}
-          className={`w-full border border-dashed rounded-md py-4 px-4 flex items-center justify-center gap-2.5 text-sm font-medium text-[#0F2A56] hover:border-[#0F2A56] hover:bg-[#EFF6FF]/60 disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${
-            showRequiredErrors && report.photos.length === 0
-              ? 'border-[#DC2626] bg-[#FEF2F2]/50'
-              : 'border-[#94A3B8] bg-[#F8FAFC]'
-          }`}
-        >
-          {isProcessingPhoto ? (
-            <>
-              <Loader2 className="w-4 h-4 animate-spin" />
-              Memproses & Mengompres Foto...
-            </>
-          ) : report.photos.length >= REPORT_FIELD_LIMITS.maxPhotos ? (
-            <>Maksimal 4 Foto Tercapai</>
-          ) : (
-            <>
-              <ImagePlus className="w-4 h-4" />
-              Unggah Foto Dokumentasi (JPG/PNG)
-            </>
-          )}
-        </button>
-
-        {showRequiredErrors && report.photos.length === 0 && (
-          <p className="text-[11px] text-[#DC2626] mt-2">
-            Kolom 04. Foto Dokumentasi Kegiatan wajib diisi (unggah minimal 1 foto).
-          </p>
-        )}
-
-        {photoError && (
-          <div
-            role="alert"
-            className="mt-3 flex items-start gap-2 rounded-md border border-[#FECACA] bg-[#FEF2F2] px-3 py-2 text-xs text-[#991B1B]"
-          >
-            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-            <span>{photoError}</span>
-          </div>
-        )}
-
-        {report.photos.length > 0 && (
-          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {report.photos.map((photo, index) => (
-              <div
-                key={photo.id}
-                className="border border-[#E2E8F0] rounded-md p-2.5 bg-[#F8FAFC] flex flex-col gap-2"
-              >
-                <div className="relative aspect-[4/3] rounded overflow-hidden bg-slate-200 border border-[#E2E8F0]">
-                  <img
-                    src={photo.dataUrl}
-                    alt={photo.caption || `Foto dokumentasi ${index + 1}`}
-                    referrerPolicy="no-referrer"
-                    className="w-full h-full object-cover"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => handleRemovePhoto(photo.id)}
-                    aria-label={`Hapus foto ${index + 1}`}
-                    className="absolute top-1.5 right-1.5 inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold bg-[#DC2626] text-white rounded hover:bg-[#B91C1C] transition-colors"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                    Hapus
-                  </button>
-                </div>
-
-                <div className="text-[11px] text-[#64748B] truncate">
-                  Foto {index + 1} · {photo.name}
-                </div>
-
-                <input
-                  type="text"
-                  maxLength={REPORT_FIELD_LIMITS.photoCaption}
-                  value={photo.caption}
-                  onChange={(e) => handlePhotoCaptionChange(photo.id, e.target.value)}
-                  placeholder="Keterangan singkat foto..."
-                  className="w-full rounded border border-[#CBD5E1] bg-white px-2.5 py-1.5 text-xs text-[#0F172A] focus:border-[#0F2A56] focus:outline-none"
-                />
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
     </div>
   );
 };

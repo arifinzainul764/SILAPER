@@ -1,6 +1,7 @@
 import { jsPDF } from 'jspdf';
 import { TravelReportData } from '../types/report';
-import { loadImageForExport } from './imageUtils';
+import { buildPendahuluanDasarItems } from './dasarUtils';
+import { loadDefaultEmblemForExport, loadImageForExport } from './imageUtils';
 
 export async function exportReportToPdf(report: TravelReportData): Promise<void> {
   const doc = new jsPDF({
@@ -24,42 +25,72 @@ export async function exportReportToPdf(report: TravelReportData): Promise<void>
     }
   };
 
-  // Kop Surat + Logo di sisi kiri judul
-  try {
-    const logo = await loadImageForExport('/assets/aistudio/image_08502736.png');
-    doc.addImage(logo.dataUrl, 'JPEG', marginL, y - 2, 18, 18);
-  } catch {
-    // Abaikan jika logo gagal dimuat saat ekspor
+  let renderedBanner = false;
+  if (report.kopBannerDataUrl) {
+    try {
+      const banner = await loadImageForExport(report.kopBannerDataUrl);
+      const drawW = contentW;
+      const drawH = (banner.height / Math.max(1, banner.width)) * drawW;
+      doc.addImage(banner.dataUrl, banner.format, marginL, y, drawW, drawH);
+      y += drawH + 7;
+      renderedBanner = true;
+    } catch {
+      renderedBanner = false;
+    }
   }
 
-  const textCenterX = pageW / 2 + 4;
-  const headerTextW = contentW - 24;
+  if (!renderedBanner) {
+    // Kop Surat + Logo di sisi kiri judul
+    try {
+      const logo = report.logoDataUrl
+        ? await loadImageForExport(report.logoDataUrl)
+        : await loadDefaultEmblemForExport();
+      const maxW = 18;
+      const maxH = 20;
+      const scale = Math.min(maxW / Math.max(1, logo.width), maxH / Math.max(1, logo.height));
+      const drawW = logo.width * scale;
+      const drawH = logo.height * scale;
+      const drawX = marginL + (maxW - drawW) / 2;
+      const drawY = y - 2 + (maxH - drawH) / 2;
+      doc.addImage(logo.dataUrl, logo.format, drawX, drawY, drawW, drawH);
+    } catch {
+      // Abaikan jika logo gagal dimuat saat ekspor
+    }
 
-  doc.setFont('times', 'bold');
-  doc.setFontSize(13);
-  doc.text((report.namaKabupaten || 'PEMERINTAH KABUPATEN').toUpperCase(), textCenterX, y, {
-    align: 'center',
-  });
-  y += 6;
+    const textCenterX = pageW / 2 + 4;
+    const headerTextW = contentW - 24;
 
-  doc.setFontSize(16);
-  doc.text((report.namaKecamatan || 'KECAMATAN').toUpperCase(), textCenterX, y, {
-    align: 'center',
-  });
-  y += 5;
+    doc.setFont('times', 'bold');
+    doc.setFontSize(13);
+    doc.text((report.namaKabupaten || 'PEMERINTAH KABUPATEN').toUpperCase(), textCenterX, y, {
+      align: 'center',
+    });
+    y += 6;
 
-  doc.setFont('times', 'normal');
-  doc.setFontSize(9.5);
-  const alamatLines = doc.splitTextToSize(report.alamatKecamatan || '-', headerTextW);
-  doc.text(alamatLines, textCenterX, y, { align: 'center' });
-  y = Math.max(y + alamatLines.length * 4 + 2, 36);
+    doc.setFontSize(16);
+    doc.text((report.namaKecamatan || 'KECAMATAN').toUpperCase(), textCenterX, y, {
+      align: 'center',
+    });
+    y += 5;
 
-  // Double line border Kop Surat
-  doc.setLineWidth(0.8);
-  doc.line(marginL, y, pageW - marginR, y);
-  doc.setLineWidth(0.25);
-  doc.line(marginL, y + 1.2, pageW - marginR, y + 1.2);
-  y += 9;
+    doc.setFont('times', 'normal');
+    doc.setFontSize(9.5);
+    const rawAlamatLines = (report.alamatKecamatan || '-').split('\n');
+    const alamatLines: string[] = [];
+    for (const rawLine of rawAlamatLines) {
+      const wrapped = doc.splitTextToSize(rawLine.trim() || ' ', headerTextW) as string[];
+      alamatLines.push(...wrapped);
+    }
+    doc.text(alamatLines, textCenterX, y, { align: 'center' });
+    y = Math.max(y + alamatLines.length * 4 + 2, 36);
+
+    // Double line border Kop Surat
+    doc.setLineWidth(0.8);
+    doc.line(marginL, y, pageW - marginR, y);
+    doc.setLineWidth(0.25);
+    doc.line(marginL, y + 1.2, pageW - marginR, y + 1.2);
+    y += 9;
+  }
 
   // Judul Dokumen
   doc.setFont('times', 'bold');
@@ -117,16 +148,34 @@ export async function exportReportToPdf(report: TravelReportData): Promise<void>
 
   // I. PENDAHULUAN / DASAR
   addSectionHeading('I. PENDAHULUAN / DASAR');
-  doc.setFont('times', 'bold');
+  const { items: dasarItems, useNumbering: useDasarNumbering } = buildPendahuluanDasarItems(report);
+  doc.setFont('times', 'normal');
   doc.setFontSize(11);
-  const sptLine = doc.splitTextToSize(
-    `Surat Perintah Tugas (SPT) Nomor ${report.nomorSpt || '-'} tanggal ${report.tanggalSpt || '-'}.`,
-    contentW - 7,
-  );
-  checkPageBreak(sptLine.length * 5.2 + 2);
-  doc.text(sptLine, marginL + 7, y);
-  y += sptLine.length * 5.2 + 1.5;
-  addParagraph(report.dasarHukum);
+  dasarItems.forEach((item, idx) => {
+    if (useDasarNumbering) {
+      const prefix = `${idx + 1}.`;
+      const prefixX = marginL + 7;
+      const textX = marginL + 13;
+      const wrapped = doc.splitTextToSize(item, contentW - 13) as string[];
+      wrapped.forEach((line, lineIdx) => {
+        checkPageBreak(6);
+        if (lineIdx === 0) {
+          doc.text(prefix, prefixX, y);
+        }
+        doc.text(line, textX, y);
+        y += 5.2;
+      });
+      y += 1.2;
+    } else {
+      const wrapped = doc.splitTextToSize(item, contentW - 7) as string[];
+      for (const line of wrapped) {
+        checkPageBreak(6);
+        doc.text(line, marginL + 7, y);
+        y += 5.2;
+      }
+      y += 1.2;
+    }
+  });
   y += 2;
 
   // II. MAKSUD DAN TUJUAN
@@ -163,15 +212,13 @@ export async function exportReportToPdf(report: TravelReportData): Promise<void>
   addSectionHeading('VII. PENUTUP');
   addParagraph(report.penutup);
 
-  // Signature block
+  // Signature block (Pelaksana Perjalanan Dinas)
   checkPageBreak(48);
   y += 8;
-  const leftColCenter = marginL + contentW * 0.24;
-  const rightColCenter = marginL + contentW * 0.76;
+  const rightColCenter = marginL + contentW * 0.75;
 
   doc.setFont('times', 'normal');
   doc.setFontSize(11);
-  doc.text('Mengetahui,', leftColCenter, y, { align: 'center' });
   doc.text(
     `${report.tempatLaporan || 'Cisarua'}, ${report.tanggalLaporan || report.tanggalSpt || '-'}`,
     rightColCenter,
@@ -181,17 +228,10 @@ export async function exportReportToPdf(report: TravelReportData): Promise<void>
   y += 5.5;
 
   doc.setFont('times', 'bold');
-  const camatTitle = `Camat ${(report.namaKecamatan || '').replace(/^kecamatan\s+/i, '') || 'Kecamatan'}`;
-  doc.text(camatTitle, leftColCenter, y, { align: 'center' });
   doc.text('Pelaksana Perjalanan Dinas,', rightColCenter, y, { align: 'center' });
   y += 22;
 
-  const camatName = report.namaCamat || '...................................';
   const pegName = report.namaPegawai || '...................................';
-  doc.text(camatName, leftColCenter, y, { align: 'center' });
-  const cw = doc.getTextWidth(camatName);
-  doc.line(leftColCenter - cw / 2, y + 0.8, leftColCenter + cw / 2, y + 0.8);
-
   doc.text(pegName, rightColCenter, y, { align: 'center' });
   const pw = doc.getTextWidth(pegName);
   doc.line(rightColCenter - pw / 2, y + 0.8, rightColCenter + pw / 2, y + 0.8);
@@ -199,12 +239,10 @@ export async function exportReportToPdf(report: TravelReportData): Promise<void>
 
   doc.setFont('times', 'normal');
   doc.setFontSize(10);
-  if (report.pangkatCamat || report.pangkatGolongan) {
-    doc.text(report.pangkatCamat || '', leftColCenter, y, { align: 'center' });
-    doc.text(report.pangkatGolongan || '', rightColCenter, y, { align: 'center' });
+  if (report.pangkatGolongan) {
+    doc.text(report.pangkatGolongan, rightColCenter, y, { align: 'center' });
     y += 4.5;
   }
-  doc.text(`NIP. ${report.nipCamat || '-'}`, leftColCenter, y, { align: 'center' });
   doc.text(`NIP. ${report.nip || '-'}`, rightColCenter, y, { align: 'center' });
 
   // Lampiran Foto

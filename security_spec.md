@@ -7,7 +7,7 @@
 4. **Strict Photo Array Bounds**: `photos` is strictly bounded to at most 4 items (`size() <= 4`), with validated map keys and size limits.
 5. **Terminal State Locking**: When a `TravelReport` has `status == 'final'`, content fields cannot be edited unless the owner explicitly transitions `status` back to `'draft'`.
 6. **Verified Email Requirement**: All reads and writes require `request.auth != null && request.auth.token.email_verified == true`.
-7. **Admin-Only Staff Registry**: Only the verified Admin (`arifinzainul764@gmail.com`) can list, create, update, or delete `/authorizedStaff/{staffId}` documents. Verified staff members may only `get` their own document ID matching `request.auth.token.email.lower()`.
+7. **Admin-Only Staff Registry**: Only the verified Admin (`arifinzainul764@gmail.com`) can create, update, or delete `/authorizedStaff/{staffId}` documents (keyed by normalized `nipKey`, requiring `nip`, `displayName`, `jabatan`, and salted `passwordHash`; `email` is optional). Verified staff members may only `get` or `list` their own record matching `request.auth.token.email.lower()` (when email is non-empty).
 
 ## 2. The "Dirty Dozen" Adversarial Payloads
 1. **Identity Spoofing (Profile)**: Authenticated user `uidA` attempts to create `/users/uidB` with `uid: "uidB"`. -> `PERMISSION_DENIED`.
@@ -21,4 +21,4 @@
 9. **Value Poisoning in Photos**: User `uidA` submits `photos: [123]` instead of valid photo maps. -> `PERMISSION_DENIED`.
 10. **Client Timestamp Forgery**: User `uidA` submits `createdAt` set to a past timestamp instead of `request.time`. -> `PERMISSION_DENIED`.
 11. **Immutable Owner Mutation**: User `uidA` updates `/users/uidA/reports/rep1` trying to change `ownerId` to `uidB`. -> `PERMISSION_DENIED`.
-12. **Privilege Escalation (Staff Allowlist)**: Non-admin staff user attempts to `list`, `create`, `update`, or `delete` `/authorizedStaff/{staffId}`, or `get` another staff member's `/authorizedStaff/{otherEmail}`. -> `PERMISSION_DENIED`.
+12. **Privilege Escalation / Scraping (Staff Registry)**: Non-admin staff user attempts to `create`, `update`, or `delete` `/authorizedStaff/{staffId}`, or `list` `/authorizedStaff` without `where('email', '==', theirVerifiedEmail)`, or `where('email', '==', '')`. -> `PERMISSION_DENIED`.

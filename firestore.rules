@@ -55,14 +55,23 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
-    // Validation Blueprint: AuthorizedStaff
+    // Validation Blueprint: AuthorizedStaff (NIP, Nama Lengkap, Jabatan, Password Hash required; Email optional)
     function isValidAuthorizedStaff(data, staffId) {
-      return data.keys().hasAll(['email', 'displayName', 'jabatan', 'nip', 'active', 'addedBy', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['email', 'displayName', 'jabatan', 'nip', 'active', 'addedBy', 'createdAt', 'updatedAt'])
-        && data.email is string && data.email == staffId && isValidEmailId(data.email)
+      return data.keys().hasAll([
+          'nip', 'nipKey', 'displayName', 'jabatan', 'passwordSalt',
+          'passwordHash', 'email', 'active', 'addedBy', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'nip', 'nipKey', 'displayName', 'jabatan', 'passwordSalt',
+          'passwordHash', 'email', 'active', 'addedBy', 'createdAt', 'updatedAt'
+        ])
+        && data.nip is string && data.nip.size() >= 1 && data.nip.size() <= 60
+        && data.nipKey is string && data.nipKey == staffId && data.nipKey.size() >= 1 && data.nipKey.size() <= 60 && isValidId(data.nipKey)
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
-        && data.jabatan is string && data.jabatan.size() <= 160
-        && data.nip is string && data.nip.size() <= 60
+        && data.jabatan is string && data.jabatan.size() >= 1 && data.jabatan.size() <= 160
+        && data.passwordSalt is string && data.passwordSalt.size() >= 16 && data.passwordSalt.size() <= 64 && data.passwordSalt.matches('^[a-f0-9]+$')
+        && data.passwordHash is string && data.passwordHash.size() >= 64 && data.passwordHash.size() <= 128 && data.passwordHash.matches('^[a-f0-9]+$')
+        && data.email is string && (data.email == '' || isValidEmailId(data.email))
         && data.active is bool
         && data.addedBy is string && data.addedBy.size() >= 1 && data.addedBy.size() <= 128 && isValidId(data.addedBy)
         && data.createdAt is timestamp
@@ -98,7 +107,7 @@ service cloud.firestore {
           'tanggalBerangkat', 'tanggalKembali', 'hasilPelaksanaan',
           'kesimpulanSaran', 'penutup', 'tempatLaporan', 'tanggalLaporan',
           'namaCamat', 'nipCamat', 'pangkatCamat', 'status', 'photos',
-          'createdAt', 'updatedAt'
+          'logoDataUrl', 'kopBannerDataUrl', 'createdAt', 'updatedAt'
         ])
         && data.ownerId is string && data.ownerId == request.auth.uid && data.ownerId == userId && isValidId(data.ownerId)
         && data.namaKabupaten is string && data.namaKabupaten.size() <= 160
@@ -129,30 +138,36 @@ service cloud.firestore {
         && (data.photos.size() <= 1 || isValidPhotoItem(data.photos[1]))
         && (data.photos.size() <= 2 || isValidPhotoItem(data.photos[2]))
         && (data.photos.size() <= 3 || isValidPhotoItem(data.photos[3]))
+        && (!data.keys().hasAny(['logoDataUrl']) || (data.logoDataUrl is string && data.logoDataUrl.size() <= 220000))
+        && (!data.keys().hasAny(['kopBannerDataUrl']) || (data.kopBannerDataUrl is string && data.kopBannerDataUrl.size() <= 220000))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
 
     match /authorizedStaff/{staffId} {
       allow get: if isVerifiedUser()
-        && isValidEmailId(staffId)
-        && (isAdmin() || (request.auth.token.email != null && request.auth.token.email.lower() == staffId));
-      allow list: if isAdmin() && resource.data.addedBy == request.auth.uid;
+        && isValidId(staffId)
+        && (isAdmin() || (request.auth.token.email != null && existing().email != '' && existing().email == request.auth.token.email.lower()));
+      allow list: if (isAdmin() && existing().addedBy == request.auth.uid)
+        || (isVerifiedUser()
+          && request.auth.token.email != null
+          && request.auth.token.email.size() >= 3
+          && existing().email == request.auth.token.email.lower());
       allow create: if isAdmin()
-        && isValidEmailId(staffId)
+        && isValidId(staffId)
         && isValidAuthorizedStaff(incoming(), staffId)
         && incoming().addedBy == request.auth.uid
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
       allow update: if isAdmin()
-        && isValidEmailId(staffId)
+        && isValidId(staffId)
         && isValidAuthorizedStaff(incoming(), staffId)
-        && incoming().email == existing().email
+        && incoming().nipKey == existing().nipKey
         && incoming().addedBy == existing().addedBy
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'jabatan', 'nip', 'active', 'updatedAt']);
-      allow delete: if isAdmin() && isValidEmailId(staffId);
+        && incoming().diff(existing()).affectedKeys().hasOnly(['nip', 'displayName', 'jabatan', 'email', 'passwordSalt', 'passwordHash', 'active', 'updatedAt']);
+      allow delete: if isAdmin() && (isValidId(staffId) || isValidEmailId(staffId));
     }
 
     match /users/{userId} {
@@ -198,7 +213,7 @@ service cloud.firestore {
               'tanggalBerangkat', 'tanggalKembali', 'hasilPelaksanaan',
               'kesimpulanSaran', 'penutup', 'tempatLaporan', 'tanggalLaporan',
               'namaCamat', 'nipCamat', 'pangkatCamat', 'status', 'photos',
-              'updatedAt'
+              'logoDataUrl', 'kopBannerDataUrl', 'updatedAt'
             ]))
             || (existing().status == 'final' && incoming().status == 'draft' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
           );

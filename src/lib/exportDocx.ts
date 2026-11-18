@@ -14,7 +14,8 @@ import {
 } from 'docx';
 import { saveAs } from 'file-saver';
 import { TravelReportData } from '../types/report';
-import { loadImageForExport } from './imageUtils';
+import { buildPendahuluanDasarItems } from './dasarUtils';
+import { loadDefaultEmblemForExport, loadImageForExport } from './imageUtils';
 
 const NO_BORDER = {
   top: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
@@ -96,99 +97,150 @@ function makeInfoRow(label: string, value: string): TableRow {
 }
 
 export async function exportReportToDocx(report: TravelReportData): Promise<void> {
-  let logoBytes: Uint8Array | null = null;
-  try {
-    const loadedLogo = await loadImageForExport('/assets/aistudio/image_08502736.png');
-    logoBytes = loadedLogo.bytes;
-  } catch {
-    logoBytes = null;
-  }
+  let kopHeaderBlock: Paragraph | Table | null = null;
 
-  const headerBottomBorder = {
-    top: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
-    left: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
-    right: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
-    bottom: { style: BorderStyle.DOUBLE, size: 18, color: '000000' },
-  };
-
-  const kopTable = new Table({
-    width: { size: 100, type: WidthType.PERCENTAGE },
-    rows: [
-      new TableRow({
+  if (report.kopBannerDataUrl) {
+    try {
+      const loadedBanner = await loadImageForExport(report.kopBannerDataUrl);
+      const bannerWidth = 472;
+      const bannerHeight = Math.max(
+        48,
+        Math.round((loadedBanner.height / Math.max(1, loadedBanner.width)) * bannerWidth),
+      );
+      kopHeaderBlock = new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 140 },
         children: [
-          new TableCell({
-            width: { size: 15, type: WidthType.PERCENTAGE },
-            borders: headerBottomBorder,
-            margins: { bottom: 100 },
-            children: [
-              new Paragraph({
-                alignment: AlignmentType.CENTER,
-                children: logoBytes
-                  ? [
-                      new ImageRun({
-                        type: 'jpg',
-                        data: logoBytes,
-                        transformation: { width: 62, height: 62 },
-                      }),
-                    ]
-                  : [],
-              }),
-            ],
-          }),
-          new TableCell({
-            width: { size: 70, type: WidthType.PERCENTAGE },
-            borders: headerBottomBorder,
-            margins: { bottom: 100 },
-            children: [
-              new Paragraph({
-                alignment: AlignmentType.CENTER,
-                spacing: { after: 20 },
-                children: [
-                  new TextRun({
-                    text: (report.namaKabupaten || 'PEMERINTAH KABUPATEN').toUpperCase(),
-                    bold: true,
-                    font: 'Times New Roman',
-                    size: 26,
-                  }),
-                ],
-              }),
-              new Paragraph({
-                alignment: AlignmentType.CENTER,
-                spacing: { after: 30 },
-                children: [
-                  new TextRun({
-                    text: (report.namaKecamatan || 'KECAMATAN').toUpperCase(),
-                    bold: true,
-                    font: 'Times New Roman',
-                    size: 32,
-                  }),
-                ],
-              }),
-              new Paragraph({
-                alignment: AlignmentType.CENTER,
-                children: [
-                  new TextRun({
-                    text: report.alamatKecamatan || '-',
-                    font: 'Times New Roman',
-                    size: 18,
-                  }),
-                ],
-              }),
-            ],
-          }),
-          new TableCell({
-            width: { size: 15, type: WidthType.PERCENTAGE },
-            borders: headerBottomBorder,
-            margins: { bottom: 100 },
-            children: [new Paragraph({ children: [] })],
+          new ImageRun({
+            type: loadedBanner.format === 'PNG' ? 'png' : 'jpg',
+            data: loadedBanner.bytes,
+            transformation: { width: bannerWidth, height: bannerHeight },
           }),
         ],
-      }),
-    ],
-  });
+      });
+    } catch {
+      kopHeaderBlock = null;
+    }
+  }
+
+  if (!kopHeaderBlock) {
+    let logoBytes: Uint8Array | null = null;
+    let logoType: 'png' | 'jpg' = 'png';
+    let logoWidth = 62;
+    let logoHeight = 62;
+    try {
+      const loadedLogo = report.logoDataUrl
+        ? await loadImageForExport(report.logoDataUrl)
+        : await loadDefaultEmblemForExport();
+      logoBytes = loadedLogo.bytes;
+      logoType = loadedLogo.format === 'PNG' ? 'png' : 'jpg';
+      const ratio = loadedLogo.width / Math.max(1, loadedLogo.height);
+      if (ratio >= 1) {
+        logoWidth = 64;
+        logoHeight = Math.max(32, Math.round(64 / ratio));
+      } else {
+        logoHeight = 68;
+        logoWidth = Math.max(32, Math.round(68 * ratio));
+      }
+    } catch {
+      logoBytes = null;
+    }
+
+    const headerBottomBorder = {
+      top: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+      left: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+      right: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+      bottom: { style: BorderStyle.DOUBLE, size: 18, color: '000000' },
+    };
+
+    const alamatParagraphs = (report.alamatKecamatan || '-')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const resolvedAlamatLines = alamatParagraphs.length > 0 ? alamatParagraphs : ['-'];
+
+    kopHeaderBlock = new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      rows: [
+        new TableRow({
+          children: [
+            new TableCell({
+              width: { size: 15, type: WidthType.PERCENTAGE },
+              borders: headerBottomBorder,
+              margins: { bottom: 100 },
+              children: [
+                new Paragraph({
+                  alignment: AlignmentType.CENTER,
+                  children: logoBytes
+                    ? [
+                        new ImageRun({
+                          type: logoType,
+                          data: logoBytes,
+                          transformation: { width: logoWidth, height: logoHeight },
+                        }),
+                      ]
+                    : [],
+                }),
+              ],
+            }),
+            new TableCell({
+              width: { size: 70, type: WidthType.PERCENTAGE },
+              borders: headerBottomBorder,
+              margins: { bottom: 100 },
+              children: [
+                new Paragraph({
+                  alignment: AlignmentType.CENTER,
+                  spacing: { after: 20 },
+                  children: [
+                    new TextRun({
+                      text: (report.namaKabupaten || 'PEMERINTAH KABUPATEN').toUpperCase(),
+                      bold: true,
+                      font: 'Times New Roman',
+                      size: 26,
+                    }),
+                  ],
+                }),
+                new Paragraph({
+                  alignment: AlignmentType.CENTER,
+                  spacing: { after: 30 },
+                  children: [
+                    new TextRun({
+                      text: (report.namaKecamatan || 'KECAMATAN').toUpperCase(),
+                      bold: true,
+                      font: 'Times New Roman',
+                      size: 32,
+                    }),
+                  ],
+                }),
+                ...resolvedAlamatLines.map(
+                  (line) =>
+                    new Paragraph({
+                      alignment: AlignmentType.CENTER,
+                      children: [
+                        new TextRun({
+                          text: line,
+                          font: 'Times New Roman',
+                          size: 18,
+                        }),
+                      ],
+                    }),
+                ),
+              ],
+            }),
+            new TableCell({
+              width: { size: 15, type: WidthType.PERCENTAGE },
+              borders: headerBottomBorder,
+              margins: { bottom: 100 },
+              children: [new Paragraph({ children: [] })],
+            }),
+          ],
+        }),
+      ],
+    });
+  }
 
   const children: (Paragraph | Table)[] = [
-    kopTable,
+    kopHeaderBlock,
 
     // Title
     new Paragraph({
@@ -218,19 +270,26 @@ export async function exportReportToDocx(report: TravelReportData): Promise<void
 
     // I. PENDAHULUAN / DASAR
     makeSectionHeading('I. PENDAHULUAN / DASAR'),
-    new Paragraph({
-      spacing: { after: 60 },
-      indent: { left: 360 },
-      children: [
-        new TextRun({
-          text: `Surat Perintah Tugas (SPT) Nomor ${report.nomorSpt || '-'} tanggal ${report.tanggalSpt || '-'}.`,
-          bold: true,
-          font: 'Times New Roman',
-          size: 22,
-        }),
-      ],
-    }),
-    ...makeTextLines(report.dasarHukum),
+    ...(() => {
+      const { items: dasarItems, useNumbering } = buildPendahuluanDasarItems(report);
+      return dasarItems.map(
+        (item, idx) =>
+          new Paragraph({
+            alignment: AlignmentType.JUSTIFIED,
+            spacing: { after: 80, line: 276 },
+            indent: useNumbering ? { left: 640, hanging: 280 } : { left: 360 },
+            children: [
+              new TextRun({
+                text: useNumbering ? `${idx + 1}. ${item}` : item,
+                bold: false,
+                italics: false,
+                font: 'Times New Roman',
+                size: 22,
+              }),
+            ],
+          }),
+      );
+    })(),
 
     // II. MAKSUD DAN TUJUAN
     makeSectionHeading('II. MAKSUD DAN TUJUAN'),
@@ -282,7 +341,7 @@ export async function exportReportToDocx(report: TravelReportData): Promise<void
     // Spacer before signature
     new Paragraph({ spacing: { before: 280 }, children: [] }),
 
-    // Two-column Signature Block
+    // Right-aligned Signature Block (Pelaksana Perjalanan Dinas)
     new Table({
       width: { size: 100, type: WidthType.PERCENTAGE },
       rows: [
@@ -291,56 +350,7 @@ export async function exportReportToDocx(report: TravelReportData): Promise<void
             new TableCell({
               width: { size: 50, type: WidthType.PERCENTAGE },
               borders: NO_BORDER,
-              children: [
-                new Paragraph({
-                  alignment: AlignmentType.CENTER,
-                  children: [new TextRun({ text: 'Mengetahui,', font: 'Times New Roman', size: 22 })],
-                }),
-                new Paragraph({
-                  alignment: AlignmentType.CENTER,
-                  spacing: { after: 700 },
-                  children: [
-                    new TextRun({
-                      text: `Camat ${(report.namaKecamatan || '').replace(/^kecamatan\s+/i, '') || 'Kecamatan'}`,
-                      bold: true,
-                      font: 'Times New Roman',
-                      size: 22,
-                    }),
-                  ],
-                }),
-                new Paragraph({
-                  alignment: AlignmentType.CENTER,
-                  children: [
-                    new TextRun({
-                      text: report.namaCamat || '........................................',
-                      bold: true,
-                      underline: {},
-                      font: 'Times New Roman',
-                      size: 22,
-                    }),
-                  ],
-                }),
-                new Paragraph({
-                  alignment: AlignmentType.CENTER,
-                  children: [
-                    new TextRun({
-                      text: report.pangkatCamat || '',
-                      font: 'Times New Roman',
-                      size: 20,
-                    }),
-                  ],
-                }),
-                new Paragraph({
-                  alignment: AlignmentType.CENTER,
-                  children: [
-                    new TextRun({
-                      text: `NIP. ${report.nipCamat || '-'}`,
-                      font: 'Times New Roman',
-                      size: 20,
-                    }),
-                  ],
-                }),
-              ],
+              children: [new Paragraph({ children: [] })],
             }),
             new TableCell({
               width: { size: 50, type: WidthType.PERCENTAGE },
