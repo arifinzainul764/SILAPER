@@ -205,12 +205,12 @@ export const A4Preview: React.FC<A4PreviewProps> = ({ report }) => {
                   <tr className="align-top">
                     <td className="w-40 py-0.5">Tanggal Berangkat</td>
                     <td className="w-4 py-0.5">:</td>
-                    <td className="py-0.5">{report.tanggalBerangkat || report.tanggalSpt || '-'}</td>
+                    <td className="py-0.5">{report.tanggalBerangkat || report.tanggalKembali || report.tanggalSpt || '-'}</td>
                   </tr>
                   <tr className="align-top">
                     <td className="w-40 py-0.5">Tanggal Kembali</td>
                     <td className="w-4 py-0.5">:</td>
-                    <td className="py-0.5">{report.tanggalKembali || report.tanggalSpt || '-'}</td>
+                    <td className="py-0.5">{report.tanggalKembali || report.tanggalBerangkat || report.tanggalSpt || '-'}</td>
                   </tr>
                 </tbody>
               </table>
@@ -280,7 +280,7 @@ export const A4Preview: React.FC<A4PreviewProps> = ({ report }) => {
           <div className="w-1/2 text-center">
             <p>
               {report.tempatLaporan || kecamatanShort},{' '}
-              {report.tanggalLaporan || report.tanggalSpt || '....................'}
+              {report.tanggalLaporan || report.tanggalKembali || report.tanggalSpt || '....................'}
             </p>
             <p className="font-bold">Pelaksana Perjalanan Dinas,</p>
             <div className="h-20" />

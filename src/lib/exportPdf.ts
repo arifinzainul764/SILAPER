@@ -186,8 +186,8 @@ export async function exportReportToPdf(report: TravelReportData): Promise<void>
 
   // III. WAKTU PELAKSANAAN
   addSectionHeading('III. WAKTU PELAKSANAAN');
-  addKeyValueRow('Tanggal Berangkat', report.tanggalBerangkat || report.tanggalSpt);
-  addKeyValueRow('Tanggal Kembali', report.tanggalKembali || report.tanggalSpt);
+  addKeyValueRow('Tanggal Berangkat', report.tanggalBerangkat || report.tanggalKembali || report.tanggalSpt);
+  addKeyValueRow('Tanggal Kembali', report.tanggalKembali || report.tanggalBerangkat || report.tanggalSpt);
   y += 2;
 
   // IV. PETUGAS YANG MELAKSANAKAN
@@ -220,7 +220,7 @@ export async function exportReportToPdf(report: TravelReportData): Promise<void>
   doc.setFont('times', 'normal');
   doc.setFontSize(11);
   doc.text(
-    `${report.tempatLaporan || 'Cisarua'}, ${report.tanggalLaporan || report.tanggalSpt || '-'}`,
+    `${report.tempatLaporan || 'Cisarua'}, ${report.tanggalLaporan || report.tanggalKembali || report.tanggalSpt || '-'}`,
     rightColCenter,
     y,
     { align: 'center' },

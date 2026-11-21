@@ -250,6 +250,7 @@ Periksa bagian Kop Surat pada halaman pertama SPT dengan sangat teliti:
 - Baca susunan teks Kop Surat persis seperti yang tampil (namaKabupaten untuk baris induk instansi seperti PEMERINTAH KABUPATEN ..., namaKecamatan untuk baris nama instansi/kecamatan utama, dan alamatKecamatan untuk seluruh baris alamat, telepon, pos-el/email, laman, serta kode pos dengan mempertahankan jeda baris \\n agar format barisnya sesuai Kop asli).
 - Jika terdapat lambang/logo instansi di kiri atas Kop Surat, set hasKopLogo: true dan isi logoBox dengan koordinat bounding box [ymin, xmin, ymax, xmax] berskala 0 sampai 1000 yang melingkupi HANYA gambar/lambang logo secara ketat dan presisi — JANGAN menyertakan garis pembatas hitam horizontal di bawah kop surat maupun teks di samping logo (jika tidak ada logo di Kop Surat, set hasKopLogo: false dan logoBox: []).
 - Isi kopBox dengan bounding box [ymin, xmin, ymax, xmax] berskala 0 sampai 1000 yang melingkupi seluruh blok Kop Surat halaman pertama (mulai dari sisi atas logo/baris pertama Kop hingga tepat di bawah garis pembatas bawah Kop Surat, TIDAK termasuk judul "SURAT PERINTAH TUGAS").${logoImageHint}
+Untuk tanggalBerangkat dan tanggalKembali, ekstrak tanggal pelaksanaan tugas dari isi SPT (jika tugas hanya 1 hari, isi keduanya dengan tanggal pelaksanaan tersebut; jika lebih dari 1 hari, isi tanggalBerangkat dengan tanggal mulai dan tanggalKembali dengan tanggal selesai/kembali).
 Selain itu, buatlah draf otomatis untuk kolom hasilPelaksanaan (V. Hasil Pelaksanaan Kegiatan) dan kesimpulanSaran (VI. Kesimpulan dan Saran) yang selaras dengan maksud perjalanan dan tujuan pada SPT dalam bahasa Indonesia dinas yang formal. Masing-masing kolom hasilPelaksanaan dan kesimpulanSaran WAJIB berupa 1 kalimat sangat singkat (maksimal 65–72 karakter, tanpa penomoran dan tanpa baris baru) agar tepat muat dalam paling banyak 1 baris pada kertas A4.${textContextSection}`,
     });
   }
@@ -446,6 +447,16 @@ app.post(['/api/extract-spt', '/api/extract-spt/'], async (req, res) => {
 
     const parsed = parseModelJsonObject(response.text);
     if (resolvedType === 'spt') {
+      const rawBerangkat =
+        typeof parsed.tanggalBerangkat === 'string' ? parsed.tanggalBerangkat.trim() : '';
+      const rawKembali =
+        typeof parsed.tanggalKembali === 'string' ? parsed.tanggalKembali.trim() : '';
+      const rawSpt = typeof parsed.tanggalSpt === 'string' ? parsed.tanggalSpt.trim() : '';
+      const resolvedBerangkat = rawBerangkat || rawKembali || rawSpt;
+      const resolvedKembali = rawKembali || rawBerangkat || rawSpt;
+      parsed.tanggalBerangkat = resolvedBerangkat;
+      parsed.tanggalKembali = resolvedKembali;
+      parsed.tanggalLaporan = resolvedKembali;
       parsed.hasilPelaksanaan = clampMaxOneA4Line(parsed.hasilPelaksanaan);
       parsed.kesimpulanSaran = clampMaxOneA4Line(parsed.kesimpulanSaran);
     }

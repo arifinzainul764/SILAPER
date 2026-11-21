@@ -158,6 +158,9 @@ export function parseDigitalSptTextLocally(rawText: string): Partial<TravelRepor
       : 'Pelaksanaan tugas berjalan sesuai rencana dan agar segera ditindaklanjuti.',
   );
 
+  const resolvedTanggalBerangkat = tanggalBerangkat || tanggalKembali || tanggalSpt;
+  const resolvedTanggalKembali = tanggalKembali || tanggalBerangkat || tanggalSpt;
+
   return {
     namaKabupaten,
     namaKecamatan,
@@ -171,11 +174,12 @@ export function parseDigitalSptTextLocally(rawText: string): Partial<TravelRepor
     jabatan,
     tujuan,
     maksudPerjalanan,
-    tanggalBerangkat,
-    tanggalKembali,
+    tanggalBerangkat: resolvedTanggalBerangkat,
+    tanggalKembali: resolvedTanggalKembali,
     hasilPelaksanaan,
     kesimpulanSaran,
     tempatLaporan,
+    tanggalLaporan: resolvedTanggalKembali,
     namaCamat,
     nipCamat,
     pangkatCamat,

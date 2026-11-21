@@ -1585,6 +1585,17 @@ export default function App() {
       const generatedKesimpulan =
         clampMaxOneA4Line(extracted.kesimpulanSaran) || fallbackKesimpulan;
 
+      const resolvedTanggalBerangkat =
+        extracted.tanggalBerangkat?.trim() ||
+        extracted.tanggalKembali?.trim() ||
+        extracted.tanggalSpt?.trim() ||
+        prev.tanggalBerangkat;
+      const resolvedTanggalKembali =
+        extracted.tanggalKembali?.trim() ||
+        extracted.tanggalBerangkat?.trim() ||
+        extracted.tanggalSpt?.trim() ||
+        prev.tanggalKembali;
+
       return {
         ...prev,
         namaKabupaten: extracted.namaKabupaten || prev.namaKabupaten,
@@ -1599,11 +1610,12 @@ export default function App() {
         jabatan: extracted.jabatan || prev.jabatan,
         tujuan: extracted.tujuan || prev.tujuan,
         maksudPerjalanan: extracted.maksudPerjalanan || prev.maksudPerjalanan,
-        tanggalBerangkat: extracted.tanggalBerangkat || extracted.tanggalSpt || prev.tanggalBerangkat,
-        tanggalKembali: extracted.tanggalKembali || extracted.tanggalSpt || prev.tanggalKembali,
+        tanggalBerangkat: resolvedTanggalBerangkat,
+        tanggalKembali: resolvedTanggalKembali,
         hasilPelaksanaan: generatedHasil,
         kesimpulanSaran: generatedKesimpulan,
         tempatLaporan: extracted.tempatLaporan || prev.tempatLaporan,
+        tanggalLaporan: resolvedTanggalKembali || prev.tanggalLaporan,
         namaCamat: extracted.namaCamat || prev.namaCamat,
         nipCamat: extracted.nipCamat || prev.nipCamat,
         pangkatCamat: extracted.pangkatCamat || prev.pangkatCamat,

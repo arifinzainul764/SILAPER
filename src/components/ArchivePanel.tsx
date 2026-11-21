@@ -469,7 +469,7 @@ export const ArchivePanel: React.FC<ArchivePanelProps> = ({
                         )}
                       </td>
                       <td className="py-3.5 pr-4 align-top text-xs text-[#475569] whitespace-nowrap tabular-nums">
-                        {item.tanggalLaporan || item.tanggalSpt || '-'}
+                        {item.tanggalLaporan || item.tanggalKembali || item.tanggalSpt || '-'}
                       </td>
                       <td className="py-3.5 pr-4 align-top text-xs whitespace-nowrap">
                         {normalizedStatus === 'diterima' ? (

@@ -308,8 +308,8 @@ export async function exportReportToDocx(report: TravelReportData): Promise<void
       width: { size: 95, type: WidthType.PERCENTAGE },
       indent: { size: 360, type: WidthType.DXA },
       rows: [
-        makeInfoRow('Tanggal Berangkat', report.tanggalBerangkat || report.tanggalSpt),
-        makeInfoRow('Tanggal Kembali', report.tanggalKembali || report.tanggalSpt),
+        makeInfoRow('Tanggal Berangkat', report.tanggalBerangkat || report.tanggalKembali || report.tanggalSpt),
+        makeInfoRow('Tanggal Kembali', report.tanggalKembali || report.tanggalBerangkat || report.tanggalSpt),
       ],
     }),
 
@@ -360,7 +360,7 @@ export async function exportReportToDocx(report: TravelReportData): Promise<void
                   alignment: AlignmentType.CENTER,
                   children: [
                     new TextRun({
-                      text: `${report.tempatLaporan || 'Cisarua'}, ${report.tanggalLaporan || report.tanggalSpt || '-'}`,
+                      text: `${report.tempatLaporan || 'Cisarua'}, ${report.tanggalLaporan || report.tanggalKembali || report.tanggalSpt || '-'}`,
                       font: 'Times New Roman',
                       size: 22,
                     }),

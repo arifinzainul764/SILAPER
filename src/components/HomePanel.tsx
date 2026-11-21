@@ -244,7 +244,7 @@ export const HomePanel: React.FC<HomePanelProps> = ({
                       {item.namaPegawai}
                     </p>
                     <p className="text-xs text-[#64748B] truncate">
-                      {item.tujuan || '-'} · {item.tanggalLaporan || item.tanggalSpt || '-'}
+                      {item.tujuan || '-'} · {item.tanggalLaporan || item.tanggalKembali || item.tanggalSpt || '-'}
                     </p>
                   </div>
 
